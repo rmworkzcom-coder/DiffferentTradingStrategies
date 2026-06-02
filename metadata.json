@@ -1,0 +1,6 @@
+{
+  "name": "Alpaca Intraday Margin Dashboard",
+  "description": "Real-time Alpaca API intraday margin utilization and risk monitor with alert triggers and Python code exporter.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
