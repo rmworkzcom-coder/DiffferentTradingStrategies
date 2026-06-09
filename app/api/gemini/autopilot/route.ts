@@ -12,11 +12,12 @@ function getLocalFallbackDecision(
   targetSymbol: any,
   marginCapacityUsed: any,
   warnThreshold: any,
+  currencySign: string = "$",
   errorSnippet?: string
 ) {
   const safeMarginCapacityUsed = typeof marginCapacityUsed === "number" ? marginCapacityUsed : parseFloat(marginCapacityUsed) || 0;
   const safeWarnThreshold = typeof warnThreshold === "number" ? warnThreshold : parseFloat(warnThreshold) || 80;
-  const cleanedTarget = typeof targetSymbol === "string" ? targetSymbol.toUpperCase().trim() : "AAPL";
+  const cleanedTarget = typeof targetSymbol === "string" ? targetSymbol.toUpperCase().trim() : "RELIANCE";
 
   let action: "BUY" | "SELL" | "HOLD" = "HOLD";
   let qty = 5;
@@ -36,7 +37,7 @@ function getLocalFallbackDecision(
     if (rand > 0.65) {
       action = "BUY";
       qty = 5;
-      reason = `${rawPrefix}Analyzed long-term support metrics for ${cleanedTarget}. Simulating buy entry.`;
+      reason = `${rawPrefix}Analyzed support metrics for ${cleanedTarget}. Simulating buy entry.`;
     } else if (rand < 0.15) {
       action = "SELL";
       qty = 5;
@@ -64,11 +65,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Invalid JSON body provided." }, { status: 400 });
     }
 
-    const { positions, cash, equity, leverage, targetSymbol, marginCapacityUsed, warnThreshold } = body;
+    const { positions, cash, equity, leverage, targetSymbol, marginCapacityUsed, warnThreshold, currencySign = "$" } = body;
 
     // 1. Primary Fallback: No API Key configured
     if (!apiKey) {
-      const fallback = getLocalFallbackDecision(positions, cash, targetSymbol, marginCapacityUsed, warnThreshold);
+      const fallback = getLocalFallbackDecision(positions, cash, targetSymbol, marginCapacityUsed, warnThreshold, currencySign);
       return NextResponse.json(fallback);
     }
 
@@ -84,20 +85,20 @@ export async function POST(req: Request) {
       });
 
       const activePositionsStr = Array.isArray(positions) && positions.length > 0
-        ? positions.map((p: any) => `- **${p.symbol}**: Qty ${p.qty} | Current Price $${p.current_price} | Entry Price $${p.avg_entry_price}`).join("\n")
+        ? positions.map((p: any) => `- **${p.symbol}**: Qty ${p.qty} | Current Price ${currencySign}${p.current_price} | Entry Price ${currencySign}${p.avg_entry_price}`).join("\n")
         : "No active holdings.";
 
       const prompt = `You are the core intelligence of an Autonomous Brokerage Trading Bot called Sentry Autopilot.
-Your duty is to analyze current portfolio states and decide on the next tactical action (BUY, SELL, or HOLD) for the target symbol: ${targetSymbol || "AAPL"}.
+Your duty is to analyze current portfolio states and decide on the next tactical action (BUY, SELL, or HOLD) for the target symbol: ${targetSymbol || "RELIANCE"}.
 
-Aesthetic Constraints & Safety Rules:
+Aesthetic Constraints & Safety Rules (Denominated in ${currencySign === "₹" ? "INR Rupees (₹)" : "USD Dollars ($)"}):
 1. If the marginCapacityUsed (${marginCapacityUsed}%) is above the warnThreshold (${warnThreshold}%), you must favor reducing exposure (SELL) on the target symbol or high-beta held positions to free up cash, keeping leverage under control.
-2. If cash balance ($${cash}) is low, avoid buying high-cost positions.
+2. If cash balance (${currencySign}${cash}) is low, avoid buying high-cost positions.
 3. If portfolio is balanced and leverage is healthy, you can BUY to spot opportunities or take profit (SELL) or HOLD.
 
 Portfolio Details:
-- Portfolio Total Equity: $${equity}
-- Cash Balance: $${cash}
+- Portfolio Total Equity: ${currencySign}${equity}
+- Cash Balance: ${currencySign}${cash}
 - Portfolio Leverage: ${leverage}x
 - Margin Capacity Used currently: ${marginCapacityUsed}%
 - Margin Warning Threshold set to: ${warnThreshold}%

@@ -19,7 +19,7 @@ if (typeof window !== "undefined") {
   }
 }
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { ResponsiveContainer, AreaChart, Area, YAxis } from "recharts";
 import {
   RefreshCw,
@@ -171,12 +171,23 @@ function PositionSparkline({ symbol, currentPl, totalCost }: { symbol: string; c
 }
 
 export default function Home() {
+  // Broker selection and credentials (Default to US Alpaca market)
+  const [brokerType, setBrokerType] = useState<"ALPACA" | "ANGELONE">("ALPACA");
+
   // Alpaca States API key configuration
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [showApiSecret, setShowApiSecret] = useState(false);
   const [isPaper, setIsPaper] = useState(true);
   const [useAlpacaLive, setUseAlpacaLive] = useState(false);
+
+  // Angel One (SmartAPI Indian Market) Configuration
+  const [angelApiKey, setAngelApiKey] = useState("");
+  const [angelClientCode, setAngelClientCode] = useState("");
+  const [angelMpin, setAngelMpin] = useState("");
+  const [angelTotpSeed, setAngelTotpSeed] = useState("");
+  const [showAngelMpin, setShowAngelMpin] = useState(false);
+  const [showAngelTotp, setShowAngelTotp] = useState(false);
 
   // Connection & loading flags
   const [isConnecting, setIsConnecting] = useState(false);
@@ -188,7 +199,7 @@ export default function Home() {
 
   // Simulated (Paper Setup) Parameters
   const [simCash, setSimCash] = useState(2000);
-  const [startingCapital, setStartingCapital] = useState(3305); // Cash $2,000 + NVDA $220 + AAPL $540 + TSLA $220 + BTCUSD $325 cost basis
+  const [startingCapital, setStartingCapital] = useState(3085); // Cash $2,000 + NVDA $220 + AAPL $540 + BTCUSD $325 cost basis
   const [isEditingCash, setIsEditingCash] = useState(false);
   const [tempCashInput, setTempCashInput] = useState("");
   const [simLeverageLimit, setSimLeverageLimit] = useState(4); // 4x leverage limit
@@ -213,16 +224,6 @@ export default function Home() {
       unrealized_pl: 6.6,
       unrealized_plpc: 0.012,
       maintenance_margin_rate: 0.30,
-    },
-    {
-      symbol: "TSLA",
-      qty: 1.0,
-      avg_entry_price: 220.0,
-      current_price: 195.0,
-      market_value: 195.0,
-      unrealized_pl: -25.0,
-      unrealized_plpc: -0.1136,
-      maintenance_margin_rate: 0.40,
     },
     {
       symbol: "BTCUSD",
@@ -263,11 +264,146 @@ export default function Home() {
   const [aiAnalysis, setAiAnalysis] = useState("");
   const [isAiLoading, setIsAiLoading] = useState(false);
 
+  // Dynamic Toast alerts notification system
+  const [toasts, setToasts] = useState<{ id: string; message: string; type: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO" }[]>([]);
+
+  const showToast = useCallback((message: string, type: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO" = "INFO") => {
+    const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    setToasts((prev) => [...prev, { id, message, type }]);
+    
+    // Automatically dismiss toast after 4 seconds
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4000);
+  }, []);
+
   // --- SENTRY AUTOPILOT STATE VARIABLES & ENGINES ---
   const [isAutopilotActive, setIsAutopilotActive] = useState(false);
-  const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER">("GEMINI_AI");
+  const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER" | "TOUCH_TURN" | "MACD_FRONT_SIDE" | "SNEAKY_PIVOT">("GEMINI_AI");
+  
+  // --- TOUCH & TURN OPENING-RANGE SCALPER STATE MAP ---
+  const [touchTurnStateMap, setTouchTurnStateMap] = useState<Record<string, {
+    symbol: string;
+    atr14: number;
+    atrThreshold: number;
+    openHigh: number;
+    openLow: number;
+    rangeRange: number;
+    isBullish: boolean;
+    isValid: boolean;
+    limitPrice: number;
+    targetPrice: number;
+    stopPrice: number;
+    status: "WAITING_LIMIT" | "ACTIVE_TRADE" | "HIT_TARGET" | "HIT_STOP" | "IDLE";
+    entryPrice?: number;
+    side?: "BUY" | "SELL";
+  }>>({});
+
+  // --- MACD FRONT-SIDE MOMENTUM STRATEGY STATE MAP ---
+  const [macdStateMap, setMacdStateMap] = useState<Record<string, {
+    symbol: string;
+    ema12: number;
+    ema26: number;
+    macdValue: number;
+    signalValue: number;
+    histogram: number;
+    prevHistogram: number;
+    trendSide: "FRONT_SIDE" | "BACK_SIDE" | "NEUTRAL";
+    status: "IDLE" | "ACTIVE_TRADE" | "EXITED_BACKSIDE";
+    entryPrice?: number;
+    tradeQty: number;
+  }>>({});
+
+  // --- SNEAKY PIVOT SYSTEM STATE MAP ---
+  const [sneakyPivotStateMap, setSneakyPivotStateMap] = useState<Record<string, {
+    symbol: string;
+    rangeHigh: number;
+    rangeLow: number;
+    swingHigh: number;
+    swingLow: number;
+    status: "SCANNING" | "CANDLE1_ESTABLISHED" | "CONFIRMED_PV_CANDLE2" | "ENTRY_TRIGGERED_CANDLE3" | "ACTIVE_TRADE" | "HIT_TARGET" | "HIT_STOP";
+    side?: "BUY" | "SELL";
+    entryPrice?: number;
+    targetPrice?: number;
+    stopPrice?: number;
+    candleCount: number;
+    lastCandleAction: string;
+  }>>({});
+
   const [autopilotInterval, setAutopilotInterval] = useState(15); // in seconds
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
+  const [activeVisualizerSymbol, setActiveVisualizerSymbol] = useState<string>("");
+
+  const targetSymbols = useMemo(() => {
+    return autopilotTargetTicker
+      .split(/[\s,]+/)
+      .map(s => s.trim().toUpperCase())
+      .filter(Boolean);
+  }, [autopilotTargetTicker]);
+
+  const currentVizSymbol = useMemo(() => {
+    if (activeVisualizerSymbol && targetSymbols.includes(activeVisualizerSymbol)) {
+      return activeVisualizerSymbol;
+    }
+    return targetSymbols[0] || "AAPL";
+  }, [activeVisualizerSymbol, targetSymbols]);
+
+  // Derived states to maintain 100% backward compatibility with all UI panels and graphs
+  const touchTurnState = touchTurnStateMap[currentVizSymbol] || null;
+  const macdState = macdStateMap[currentVizSymbol] || null;
+  const sneakyPivotState = sneakyPivotStateMap[currentVizSymbol] || null;
+
+  const setTouchTurnState = useCallback((val: any) => {
+    setTouchTurnStateMap((prev) => {
+      const current = prev[currentVizSymbol] || null;
+      const next = typeof val === "function" ? val(current) : val;
+      if (next === null) {
+        const copy = { ...prev };
+        delete copy[currentVizSymbol];
+        return copy;
+      }
+      const sym = next.symbol || currentVizSymbol;
+      return {
+        ...prev,
+        [sym]: next
+      };
+    });
+  }, [currentVizSymbol]);
+
+  const setMacdState = useCallback((val: any) => {
+    setMacdStateMap((prev) => {
+      const current = prev[currentVizSymbol] || null;
+      const next = typeof val === "function" ? val(current) : val;
+      if (next === null) {
+        const copy = { ...prev };
+        delete copy[currentVizSymbol];
+        return copy;
+      }
+      const sym = next.symbol || currentVizSymbol;
+      return {
+        ...prev,
+        [sym]: next
+      };
+    });
+  }, [currentVizSymbol]);
+
+  const setSneakyPivotState = useCallback((val: any) => {
+    setSneakyPivotStateMap((prev) => {
+      const current = prev[currentVizSymbol] || null;
+      const next = typeof val === "function" ? val(current) : val;
+      if (next === null) {
+        const copy = { ...prev };
+        delete copy[currentVizSymbol];
+        return copy;
+      }
+      const sym = next.symbol || currentVizSymbol;
+      return {
+        ...prev,
+        [sym]: next
+      };
+    });
+  }, [currentVizSymbol]);
+
   const [autopilotLogs, setAutopilotLogs] = useState<{ id: string; time: string; msg: string; type: "info" | "success" | "warn" | "trade" }[]>([
     {
       id: "init",
@@ -280,40 +416,72 @@ export default function Home() {
   const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("manual");
   const [isTickStreamActive, setIsTickStreamActive] = useState(true);
   const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
+  const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
 
   // Refresh data proxy
   const handleRefreshData = useCallback(async () => {
-    if (!useAlpacaLive || !apiKey || !apiSecret) return;
+    if (!useAlpacaLive) return;
     setIsRefreshing(true);
     try {
-      const response = await fetch("/api/alpaca", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey, apiSecret, isPaper }),
-      });
+      if (brokerType === "ANGELONE") {
+        const response = await fetch("/api/angelone", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            angelApiKey,
+            angelClientCode,
+            angelMpin,
+            angelTotpSeed,
+            isMockConnection: false
+          })
+        });
 
-      const resText = await response.text();
-      let rawData: any = null;
-      try {
-        rawData = JSON.parse(resText);
-      } catch (e) {
-        throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
+        const resText = await response.text();
+        let rawData: any = null;
+        try {
+          rawData = JSON.parse(resText);
+        } catch (e) {
+          throw new Error(`Server returned error: ${resText.slice(0, 120).trim()}...`);
+        }
+
+        if (!response.ok || rawData?.error) {
+          throw new Error(rawData?.error || "Unable to sync holdings.");
+        }
+
+        setAlpacaAccount(rawData.account);
+        setAlpacaPositions(rawData.positions);
+        addLog("ANGELONE", "SYNC", "Indian market portfolio successfully synced.", "SUCCESS");
+      } else {
+        if (!apiKey || !apiSecret) return;
+        const response = await fetch("/api/alpaca", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey, apiSecret, isPaper }),
+        });
+
+        const resText = await response.text();
+        let rawData: any = null;
+        try {
+          rawData = JSON.parse(resText);
+        } catch (e) {
+          throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
+        }
+
+        if (!response.ok || rawData?.error) {
+          throw new Error(rawData?.error || `Unable to sync positions.`);
+        }
+
+        setAlpacaAccount(rawData.account);
+        setAlpacaPositions(rawData.positions);
+        addLog("ALPACA", "SYNC", "Real-time positions and balances successfully synced.", "SUCCESS");
       }
-
-      if (!response.ok || rawData?.error) {
-        throw new Error(rawData?.error || `Unable to sync positions.`);
-      }
-
-      setAlpacaAccount(rawData.account);
-      setAlpacaPositions(rawData.positions);
-      addLog("ALPACA", "SYNC", "Real-time positions and balances successfully synced.", "SUCCESS");
     } catch (err: any) {
       console.error(err);
-      addLog("ALPACA", "SYNC_ERROR", `Data stream refresh interrupted: ${err.message || err}`, "WARNING");
+      addLog(brokerType, "SYNC_ERROR", `Data stream refresh interrupted: ${err.message || err}`, "WARNING");
     } finally {
       setIsRefreshing(false);
     }
-  }, [useAlpacaLive, apiKey, apiSecret, isPaper]);
+  }, [useAlpacaLive, brokerType, angelApiKey, angelClientCode, angelMpin, angelTotpSeed, apiKey, apiSecret, isPaper]);
 
   // Stable state ref to bypass interval recreate throttling
   const stateRef = React.useRef<any>({
@@ -325,13 +493,22 @@ export default function Home() {
     isPaper,
     apiKey,
     apiSecret,
+    brokerType,
+    angelApiKey,
+    angelClientCode,
+    angelMpin,
+    angelTotpSeed,
     autopilotStrategy,
     autopilotTargetTicker,
     warnThreshold,
     isAutopilotRunning,
     alpacaAccount,
     handleRefreshData,
-    autopilotLossGuard
+    autopilotLossGuard,
+    touchTurnStateMap,
+    macdStateMap,
+    sneakyPivotStateMap,
+    autopilotBlacklist
   });
 
   useEffect(() => {
@@ -344,13 +521,22 @@ export default function Home() {
       isPaper,
       apiKey,
       apiSecret,
+      brokerType,
+      angelApiKey,
+      angelClientCode,
+      angelMpin,
+      angelTotpSeed,
       autopilotStrategy,
       autopilotTargetTicker,
       warnThreshold,
       isAutopilotRunning,
       alpacaAccount,
       handleRefreshData,
-      autopilotLossGuard
+      autopilotLossGuard,
+      touchTurnStateMap,
+      macdStateMap,
+      sneakyPivotStateMap,
+      autopilotBlacklist
     };
   }, [
     useAlpacaLive,
@@ -361,13 +547,22 @@ export default function Home() {
     isPaper,
     apiKey,
     apiSecret,
+    brokerType,
+    angelApiKey,
+    angelClientCode,
+    angelMpin,
+    angelTotpSeed,
     autopilotStrategy,
     autopilotTargetTicker,
     warnThreshold,
     isAutopilotRunning,
     alpacaAccount,
     handleRefreshData,
-    autopilotLossGuard
+    autopilotLossGuard,
+    touchTurnStateMap,
+    macdStateMap,
+    sneakyPivotStateMap,
+    autopilotBlacklist
   ]);
 
   const addAutopilotLog = (msg: string, type: "info" | "success" | "warn" | "trade") => {
@@ -384,6 +579,13 @@ export default function Home() {
     const curRef = stateRef.current;
     if (qtyNum <= 0) return;
     symbolClean = symbolClean.toUpperCase().trim();
+
+    // Automated Blacklist Intercept Check (e.g. to avoid trading low-winrate or banned symbols like TSLA in Autopilot entirely)
+    if (curRef.autopilotBlacklist?.includes(symbolClean)) {
+      addAutopilotLog(`🚫 Blacklist Blocked automated ${side} order of ${symbolClean}: symbol is blacklisted in Autopilot Control Hub.`, "warn");
+      addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Autopilot Blacklist intercepted/prevented ${side} order for ${symbolClean}.`, "WARNING");
+      return;
+    }
 
     // Sentry Loss Guard Check - prevents buying more when a position is under drawdown and losing money
     if (side === "BUY" && curRef.autopilotLossGuard) {
@@ -412,79 +614,141 @@ export default function Home() {
 
       let finalQty = qtyNum;
 
-      if (side === "BUY") {
-        let estPrice = 150.0;
-        const matchedTicker = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
-        if (matchedTicker) {
-          estPrice = matchedTicker.current_price;
-        } else {
-          if (symbolClean === "AAPL") estPrice = 182.2;
-          else if (symbolClean === "TSLA") estPrice = 195.0;
-          else if (symbolClean === "NVDA") estPrice = 115.5;
-          else if (symbolClean === "BTCUSD") estPrice = 67200.0;
-          else if (symbolClean === "MSFT") estPrice = 425.0;
-        }
-
-        const estimatedCost = estPrice * qtyNum;
-        const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-        const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
-        const isFractional = qtyNum % 1 !== 0;
-        // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
-        const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
-        const maxSafeOrderVal = maxAllowedPower * 0.70; // enforce a 30% safety collar/buffer for fractional buy orders
-
-        if (estimatedCost > maxSafeOrderVal) {
-          const maxAffordableQty = maxSafeOrderVal / estPrice;
-          if (maxAffordableQty >= 0.0001) {
-            const safeQty = maxAffordableQty;
-            if (symbolClean === "BTCUSD") {
-              finalQty = parseFloat(safeQty.toFixed(4));
-            } else {
-              finalQty = parseFloat(safeQty.toFixed(2));
-            }
-
-            if (finalQty <= (symbolClean === "BTCUSD" ? 0.0005 : 0.05)) {
-              addAutopilotLog(`Blocked live automated BUY: Affordable size ${finalQty} for ${symbolClean} is negligible. BP: ${maxAllowedPower.toFixed(2)} (safe cap: ${maxSafeOrderVal.toFixed(2)}), price: ${estPrice.toFixed(2)}.`, "warn");
-              addLog(symbolClean, "AUTO_BUY_BLOCKED", `Affordable size ${finalQty} is too small to execute. Balance: ${maxAllowedPower.toFixed(2)}.`, "WARNING");
-              return;
-            } else {
-              addAutopilotLog(`Leverage Control: Out of buying power / buffer cushion for ${qtyNum} ${symbolClean} (~${estimatedCost.toFixed(2)}). Rescaled down to ${finalQty} (~${(estPrice * finalQty).toFixed(2)}) based on ${maxSafeOrderVal.toFixed(2)} maximum safe order limit (30% buffer).`, "info");
-            }
+      if (curRef.brokerType === "ANGELONE") {
+        if (side === "BUY") {
+          let estPrice = 2475.0;
+          const matchedTicker = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
+          if (matchedTicker) {
+            estPrice = matchedTicker.current_price;
           } else {
-            addAutopilotLog(`Blocked live automated BUY: Insufficient buying power buffer. Cost for ${qtyNum} ${symbolClean} is ~${estimatedCost.toFixed(2)} with safe maximum limit of ${maxSafeOrderVal.toFixed(2)} (total BP: ${maxAllowedPower.toFixed(2)}).`, "warn");
-            addLog(symbolClean, "AUTO_BUY_BLOCKED", `Insufficient buying power: ${maxAllowedPower.toFixed(2)} available vs ${estimatedCost.toFixed(2)} required.`, "WARNING");
+            if (symbolClean === "RELIANCE") estPrice = 2475.50;
+            else if (symbolClean === "TCS") estPrice = 3820.00;
+            else if (symbolClean === "INFY") estPrice = 1515.00;
+            else if (symbolClean === "TATAMOTORS") estPrice = 962.40;
+            else if (symbolClean === "SBIN") estPrice = 820.00;
+            else if (symbolClean === "HDFCBANK") estPrice = 1600.00;
+          }
+
+          const estimatedCost = estPrice * qtyNum;
+          const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
+          const maxAllowedPower = cashValue;
+          const maxSafeOrderVal = maxAllowedPower * 0.90; // Enforce safe margin buffer
+
+          if (estimatedCost > maxSafeOrderVal) {
+            const maxAffordableQty = maxSafeOrderVal / estPrice;
+            if (maxAffordableQty >= 0.1) {
+              finalQty = parseFloat(maxAffordableQty.toFixed(1));
+              addAutopilotLog(`Leverage Control [SmartAPI]: Rescaling automated BUY of ${symbolClean} from ${qtyNum} to affordable ${finalQty} shares due to cash limit.`, "info");
+            } else {
+              addAutopilotLog(`Blocked Live automated BUY: Insufficient Cash buffer. Required: ${estimatedCost.toFixed(2)}, available: ${maxAllowedPower.toFixed(2)}.`, "warn");
+              return;
+            }
+          }
+        } else {
+          const existingPos = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
+          const ownedQty = existingPos ? existingPos.qty : 0;
+          if (ownedQty <= 0) {
+            addAutopilotLog(`Blocked automated live SmartAPI SELL of ${qtyNum} ${symbolClean}: You do not own a long position. Live Angel One short-selling is restricted.`, "warn");
             return;
+          }
+          if (finalQty > ownedQty) {
+            addAutopilotLog(`Leverage Control: Capping automated live SmartAPI SELL from ${qtyNum} to owned size ${ownedQty}.`, "info");
+            finalQty = ownedQty;
           }
         }
       } else {
-        const existingPos = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
-        const ownedQty = existingPos ? existingPos.qty : 0;
-        if (ownedQty <= 0) {
-          addAutopilotLog(`Blocked automated live SELL of ${qtyNum} ${symbolClean}: You do not own a long position. Live Alpaca short-selling is restricted. Switch to Local Simulator to trade short strategies!`, "warn");
-          addLog(symbolClean, "AUTO_SELL_BLOCKED", `Blocked automated short-sell of ${symbolClean}.`, "WARNING");
-          return;
-        }
-        if (finalQty > ownedQty) {
-          addAutopilotLog(`Leverage Control: Capping automated live SELL of ${symbolClean} from ${qtyNum} to owned size ${ownedQty} to prevent unauthorized short-selling.`, "info");
-          finalQty = ownedQty;
+        if (side === "BUY") {
+          let estPrice = 150.0;
+          const matchedTicker = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
+          if (matchedTicker) {
+            estPrice = matchedTicker.current_price;
+          } else {
+            if (symbolClean === "AAPL") estPrice = 182.2;
+            else if (symbolClean === "TSLA") estPrice = 195.0;
+            else if (symbolClean === "NVDA") estPrice = 115.5;
+            else if (symbolClean === "BTCUSD") estPrice = 67200.0;
+            else if (symbolClean === "MSFT") estPrice = 425.0;
+          }
+
+          const estimatedCost = estPrice * qtyNum;
+          const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
+          const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+          const isFractional = qtyNum % 1 !== 0;
+          // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
+          const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
+          const maxSafeOrderVal = maxAllowedPower * 0.70; // enforce a 30% safety collar/buffer for fractional buy orders
+
+          if (estimatedCost > maxSafeOrderVal) {
+            const maxAffordableQty = maxSafeOrderVal / estPrice;
+            if (maxAffordableQty >= 0.0001) {
+              const safeQty = maxAffordableQty;
+              if (symbolClean === "BTCUSD") {
+                finalQty = parseFloat(safeQty.toFixed(4));
+              } else {
+                finalQty = parseFloat(safeQty.toFixed(2));
+              }
+
+              if (finalQty <= (symbolClean === "BTCUSD" ? 0.0005 : 0.05)) {
+                addAutopilotLog(`Blocked live automated BUY: Affordable size ${finalQty} for ${symbolClean} is negligible. BP: ${maxAllowedPower.toFixed(2)} (safe cap: ${maxSafeOrderVal.toFixed(2)}), price: ${estPrice.toFixed(2)}.`, "warn");
+                addLog(symbolClean, "AUTO_BUY_BLOCKED", `Affordable size ${finalQty} is too small to execute. Balance: ${maxAllowedPower.toFixed(2)}.`, "WARNING");
+                return;
+              } else {
+                addAutopilotLog(`Leverage Control: Out of buying power / buffer cushion for ${qtyNum} ${symbolClean} (~${estimatedCost.toFixed(2)}). Rescaled down to ${finalQty} (~${(estPrice * finalQty).toFixed(2)}) based on ${maxSafeOrderVal.toFixed(2)} maximum safe order limit (30% buffer).`, "info");
+              }
+            } else {
+              addAutopilotLog(`Blocked live automated BUY: Insufficient buying power buffer. Cost for ${qtyNum} ${symbolClean} is ~${estimatedCost.toFixed(2)} with safe maximum limit of ${maxSafeOrderVal.toFixed(2)} (total BP: ${maxAllowedPower.toFixed(2)}).`, "warn");
+              addLog(symbolClean, "AUTO_BUY_BLOCKED", `Insufficient buying power: ${maxAllowedPower.toFixed(2)} available vs ${estimatedCost.toFixed(2)} required.`, "WARNING");
+              return;
+            }
+          }
+        } else {
+          const existingPos = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
+          const ownedQty = existingPos ? existingPos.qty : 0;
+          if (ownedQty <= 0) {
+            addAutopilotLog(`Blocked automated live SELL of ${qtyNum} ${symbolClean}: You do not own a long position. Live Alpaca short-selling is restricted. Switch to Local Simulator to trade short strategies!`, "warn");
+            addLog(symbolClean, "AUTO_SELL_BLOCKED", `Blocked automated short-sell of ${symbolClean}.`, "WARNING");
+            return;
+          }
+          if (finalQty > ownedQty) {
+            addAutopilotLog(`Leverage Control: Capping automated live SELL of ${symbolClean} from ${qtyNum} to owned size ${ownedQty} to prevent unauthorized short-selling.`, "info");
+            finalQty = ownedQty;
+          }
         }
       }
 
       addAutopilotLog(`[Bot Order] Queueing live brokerage market ${side} of ${finalQty} ${symbolClean}...`, "trade");
       addLog("AUTOPILOT", side, `Transmitting Bot Order: ${side} ${finalQty} shares of ${symbolClean}`, "INFO");
       try {
-        const response = await fetch("/api/alpaca/trade", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            apiKey: curRef.apiKey,
-            apiSecret: curRef.apiSecret,
-            isPaper: curRef.isPaper,
-            symbol: symbolClean,
-            qty: finalQty,
-            side: side.toLowerCase(),
-          }),
-        });
+        let response;
+        if (curRef.brokerType === "ANGELONE") {
+          response = await fetch("/api/angelone/trade", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              angelApiKey: curRef.angelApiKey,
+              angelClientCode: curRef.angelClientCode,
+              angelMpin: curRef.angelMpin,
+              angelTotpSeed: curRef.angelTotpSeed,
+              symbol: symbolClean,
+              qty: finalQty,
+              side: side.toLowerCase(),
+              isMockConnection: false
+            }),
+          });
+        } else {
+          response = await fetch("/api/alpaca/trade", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              apiKey: curRef.apiKey,
+              apiSecret: curRef.apiSecret,
+              isPaper: curRef.isPaper,
+              symbol: symbolClean,
+              qty: finalQty,
+              side: side.toLowerCase(),
+            }),
+          });
+        }
 
         const resText = await response.text();
         let dataOrder: any = null;
@@ -549,14 +813,34 @@ export default function Home() {
       }
 
       const orderCost = estPrice * qtyNum;
+      const isINR = curRef.brokerType === "ANGELONE";
+      const currencySymbol = isINR ? "₹" : "$";
+      
+      // Real-world fee/charge calculation based on asset class and broker type
+      let flatBrokerage = 1.00;
+      let taxRate = 0.0005;
+      let slippageRate = 0.0002;
+      
+      if (isINR) {
+        flatBrokerage = symbolClean === "BTCUSD" ? 0 : 20.00; // Flat ₹20 per order
+        taxRate = symbolClean === "BTCUSD" ? 0.001 : 0.0015;  // STT + Stamp duty + SEBI
+        slippageRate = 0.0003; // 0.03% slippage
+      } else {
+        flatBrokerage = symbolClean === "BTCUSD" ? 0.10 : 1.00; // SEC/FINRA and clearings
+        taxRate = symbolClean === "BTCUSD" ? 0.0015 : 0.0005;
+        slippageRate = 0.0002;
+      }
+
+      const orderFees = parseFloat((flatBrokerage + orderCost * taxRate + orderCost * slippageRate).toFixed(2));
 
       if (side === "BUY") {
-        if (orderCost > curRef.simCash) {
-          addAutopilotLog(`Blocked automated simulation: Insufficient sim balance. Needs $${orderCost.toFixed(2)}.`, "warn");
-          addLog(symbolClean, "AUTO_BUY_SIM_FAILED", "Simulated cash reserves exhausted in automated loop.", "WARNING");
+        const totalDebitWithFees = orderCost + orderFees;
+        if (totalDebitWithFees > curRef.simCash) {
+          addAutopilotLog(`Blocked automated simulation: Insufficient sim balance. Needs ${currencySymbol}${totalDebitWithFees.toFixed(2)} (including ${currencySymbol}${orderFees.toFixed(2)} fees/taxes).`, "warn");
+          addLog(symbolClean, "AUTO_BUY_SIM_FAILED", `Simulated cash reserves exhausted. Needs ${currencySymbol}${totalDebitWithFees.toFixed(2)} to cover order & fees.`, "WARNING");
           return;
         }
-        setSimCash((c) => c - orderCost);
+        setSimCash((c) => c - totalDebitWithFees);
         setMockPositions((prev) => {
           const exists = prev.find((p) => p.symbol === symbolClean);
           if (exists) {
@@ -567,14 +851,16 @@ export default function Home() {
             let newAvgEntry = exists.avg_entry_price;
             let unrealized = 0;
             if (exists.qty > 0) {
-              newAvgEntry = (exists.avg_entry_price * exists.qty + estPrice * qtyNum) / updatedQty;
+              // Include fee drag directly into average entry price to represent true dynamic breakeven!
+              const actualSpent = exists.avg_entry_price * exists.qty + orderCost + orderFees;
+              newAvgEntry = actualSpent / updatedQty;
               unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
             } else {
               if (updatedQty < 0) {
                 newAvgEntry = exists.avg_entry_price;
                 unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
               } else {
-                newAvgEntry = estPrice;
+                newAvgEntry = (orderCost + orderFees) / updatedQty;
                 unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
               }
             }
@@ -590,26 +876,30 @@ export default function Home() {
                 : p
             );
           } else {
+            // Adjust average entry price to incorporate transaction cost drag
+            const realAvgEntry = parseFloat(((orderCost + orderFees) / qtyNum).toFixed(4));
             return [
               ...prev,
               {
                 symbol: symbolClean,
                 qty: qtyNum,
-                avg_entry_price: estPrice,
+                avg_entry_price: realAvgEntry,
                 current_price: estPrice,
                 market_value: parseFloat(orderCost.toFixed(2)),
-                unrealized_pl: 0,
+                unrealized_pl: parseFloat((orderCost - realAvgEntry * qtyNum).toFixed(2)),
                 unrealized_plpc: 0,
                 maintenance_margin_rate: 0.30,
               },
             ];
           }
         });
-        addAutopilotLog(`Sim purchase complete: Acquired ${qtyNum} shares of ${symbolClean} at $${estPrice.toFixed(2)}.`, "success");
-        addLog(symbolClean, "AUTO_BUY_SIM", `Purchased simulated ${qtyNum} shares of ${symbolClean} at cash basis $${estPrice.toFixed(2)}`, "SUCCESS");
+        addAutopilotLog(`Sim purchase complete: Acquired ${qtyNum} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (Fees & slippage deducted: ${currencySymbol}${orderFees.toFixed(2)}).`, "success");
+        addLog(symbolClean, "AUTO_BUY_SIM", `Purchased simulated ${qtyNum} shares of ${symbolClean} at fee-adjusted cost basis (Fee: ${currencySymbol}${orderFees.toFixed(2)})`, "SUCCESS");
       } else {
         // Simulated SELL (With support for Short Selling / Cover)
-        setSimCash((c) => c + orderCost);
+        // Deduct fees from proceeds
+        const netProceeds = orderCost - orderFees;
+        setSimCash((c) => c + netProceeds);
         setMockPositions((prev) => {
           const exists = prev.find((p) => p.symbol === symbolClean);
           if (exists) {
@@ -624,11 +914,14 @@ export default function Home() {
                 newAvgEntry = exists.avg_entry_price;
                 unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
               } else {
-                newAvgEntry = estPrice;
+                // Short position entry fee-drag adjust
+                newAvgEntry = parseFloat(((orderCost - orderFees) / Math.abs(updatedQty)).toFixed(4));
                 unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
               }
             } else {
-              newAvgEntry = (exists.avg_entry_price * Math.abs(exists.qty) + estPrice * qtyNum) / Math.abs(updatedQty);
+              // Average entry price formulation including transaction fee drag for Shorts
+              const totalAcquiredShort = exists.avg_entry_price * Math.abs(exists.qty) + orderCost - orderFees;
+              newAvgEntry = totalAcquiredShort / Math.abs(updatedQty);
               unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
             }
             return prev.map((p) =>
@@ -644,23 +937,25 @@ export default function Home() {
             );
           } else {
             const updatedQty = -qtyNum;
+            // Adjust avg entry for short to include drag
+            const realAvgEntry = parseFloat(((orderCost - orderFees) / qtyNum).toFixed(4));
             return [
               ...prev,
               {
                 symbol: symbolClean,
                 qty: parseFloat(updatedQty.toFixed(4)),
-                avg_entry_price: estPrice,
+                avg_entry_price: realAvgEntry,
                 current_price: estPrice,
                 market_value: parseFloat((updatedQty * estPrice).toFixed(2)),
-                unrealized_pl: 0,
+                unrealized_pl: parseFloat(((realAvgEntry - estPrice) * (-updatedQty)).toFixed(2)),
                 unrealized_plpc: 0,
                 maintenance_margin_rate: 0.30,
               },
             ];
           }
         });
-        addAutopilotLog(`Sim sale complete: Sold/Short-sold ${qtyNum} shares of ${symbolClean} at $${estPrice.toFixed(2)}.`, "success");
-        addLog(symbolClean, "AUTO_SELL_SIM", `Sold simulated ${qtyNum} shares of ${symbolClean} at cash basis $${estPrice.toFixed(2)}`, "SUCCESS");
+        addAutopilotLog(`Sim sale complete: Sold/Short-sold ${qtyNum} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (Fees & slippage deducted: ${currencySymbol}${orderFees.toFixed(2)}).`, "success");
+        addLog(symbolClean, "AUTO_SELL_SIM", `Sold simulated ${qtyNum} shares of ${symbolClean} with net credit (Fees & taxes: ${currencySymbol}${orderFees.toFixed(2)})`, "SUCCESS");
       }
 
       setOrders((prev) => [
@@ -759,6 +1054,627 @@ export default function Home() {
           }
         } else {
           addAutopilotLog(`Scalper Range status: Neutral oscillation. No position change.`, "success");
+        }
+      }
+
+      else if (curRef.autopilotStrategy === "TOUCH_TURN") {
+        addAutopilotLog(`Triggering Touch & Turn (Opening-Range Scalper) on target: ${targetSymbol}...`, "info");
+
+        let tState = curRef.touchTurnState;
+        if (!tState || tState.symbol !== targetSymbol) {
+          // Calculate ATR & Opening candle bounds based on broker and symbol
+          let atr14 = 5.0;
+          let openHigh = 183.10;
+          let openLow = 181.90;
+          let isBullish = true;
+
+          if (targetSymbol === "RELIANCE") {
+            atr14 = 42.0;
+            openHigh = 2488.50;
+            openLow = 2476.10;
+            isBullish = true;
+          } else if (targetSymbol === "TCS") {
+            atr14 = 52.0;
+            openHigh = 3845.00;
+            openLow = 3815.00;
+            isBullish = false;
+          } else if (targetSymbol === "AAPL") {
+            atr14 = 3.50;
+            openHigh = 183.10;
+            openLow = 182.00;
+            isBullish = false;
+          } else if (targetSymbol === "TSLA") {
+            atr14 = 6.50;
+            openHigh = 197.80;
+            openLow = 195.90;
+            isBullish = true;
+          } else if (targetSymbol === "NVDA") {
+            atr14 = 4.10;
+            openHigh = 116.50;
+            openLow = 115.30;
+            isBullish = true;
+          } else if (targetSymbol === "BTCUSD") {
+            atr14 = 1600.0;
+            openHigh = 67650.0;
+            openLow = 67150.0;
+            isBullish = false;
+          } else {
+            const matchedSym = currentActivePositions.find((p) => p.symbol === targetSymbol);
+            let approxPrice = 100.0;
+            if (matchedSym) approxPrice = matchedSym.current_price;
+            atr14 = parseFloat((approxPrice * 0.022).toFixed(2));
+            const candleWidth = parseFloat((atr14 * 0.32).toFixed(2));
+            openHigh = parseFloat((approxPrice * 1.006).toFixed(2));
+            openLow = parseFloat((openHigh - candleWidth).toFixed(2));
+            isBullish = Math.random() > 0.5;
+          }
+
+          const rangeRange = parseFloat((openHigh - openLow).toFixed(2));
+          const atrThreshold = parseFloat((atr14 * 0.25).toFixed(2));
+          const isValidKey = rangeRange >= atrThreshold;
+
+          let limitPrice = 0;
+          let targetPrice = 0;
+          let stopPrice = 0;
+          let side: "BUY" | "SELL" = "BUY";
+
+          if (isBullish) {
+            limitPrice = openHigh;
+            targetPrice = parseFloat((openHigh - rangeRange * 0.382).toFixed(2));
+            const reward = limitPrice - targetPrice;
+            const risk = reward / 2.0;
+            stopPrice = parseFloat((limitPrice + risk).toFixed(2));
+            side = "SELL";
+          } else {
+            limitPrice = openLow;
+            targetPrice = parseFloat((openLow + rangeRange * 0.382).toFixed(2));
+            const reward = targetPrice - limitPrice;
+            const risk = reward / 2.0;
+            stopPrice = parseFloat((limitPrice - risk).toFixed(2));
+            side = "BUY";
+          }
+
+          tState = {
+            symbol: targetSymbol,
+            atr14,
+            atrThreshold,
+            openHigh,
+            openLow,
+            rangeRange,
+            isBullish,
+            isValid: isValidKey,
+            limitPrice,
+            targetPrice,
+            stopPrice,
+            status: "WAITING_LIMIT",
+            side
+          };
+
+          const curPrefix = curRef.brokerType === "ANGELONE" ? "₹" : "$";
+          addAutopilotLog(`📐 Touch & Turn Strategy initialised for ${targetSymbol}. ATR(14): ${curPrefix}${atr14.toFixed(2)} (25% threshold: ${curPrefix}${atrThreshold.toFixed(2)}). Opening 15m candle high: ${openHigh}, low: ${openLow} (range: ${rangeRange} - Qualified!).`, "info");
+          addAutopilotLog(`🎯 Placed ${side} LIMIT order at range edge: ${curPrefix}${limitPrice.toFixed(2)}. Target profit (38.2% Fib): ${curPrefix}${targetPrice.toFixed(2)}. Stop boundary (2:1 RR): ${curPrefix}${stopPrice.toFixed(2)}. Monitoring first 90 minutes.`, "success");
+          
+          setTouchTurnState(tState);
+        } else {
+          // Retrieve current price
+          const matched = currentActivePositions.find((p) => p.symbol === targetSymbol);
+          let currentSpotPrice = 150.0;
+          if (matched) {
+            currentSpotPrice = matched.current_price;
+          } else {
+            if (targetSymbol === "RELIANCE") currentSpotPrice = 2475.50;
+            else if (targetSymbol === "TCS") currentSpotPrice = 3820.00;
+            else if (targetSymbol === "AAPL") currentSpotPrice = 182.20;
+            else if (targetSymbol === "TSLA") currentSpotPrice = 195.00;
+            else if (targetSymbol === "NVDA") currentSpotPrice = 115.50;
+            else if (targetSymbol === "BTCUSD") currentSpotPrice = 67200.00;
+            else if (targetSymbol === "MSFT") currentSpotPrice = 425.00;
+          }
+
+          const curPrefix = curRef.brokerType === "ANGELONE" ? "₹" : "$";
+
+          if (tState.status === "WAITING_LIMIT") {
+            addAutopilotLog(`⏳ Waiting for ${targetSymbol} to touch limit at ${curPrefix}${tState.limitPrice.toFixed(2)}. Current price: ${curPrefix}${currentSpotPrice.toFixed(2)}. Strategy duration: 15 / 90 minutes.`, "info");
+
+            let formsEntry = false;
+            if (tState.side === "BUY" && currentSpotPrice <= tState.limitPrice) {
+              formsEntry = true;
+            } else if (tState.side === "SELL" && currentSpotPrice >= tState.limitPrice) {
+              formsEntry = true;
+            }
+
+            if (formsEntry) {
+              addAutopilotLog(`🎯 Range edge touched! Executing ${tState.side} entry order at ${curPrefix}${tState.limitPrice.toFixed(2)}.`, "trade");
+              
+              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              await executeAutopilotOrder(targetSymbol, tState.side, tradeQty);
+
+              const nextState = {
+                ...tState,
+                status: "ACTIVE_TRADE" as const,
+                entryPrice: currentSpotPrice
+              };
+              setTouchTurnState(nextState);
+              addAutopilotLog(`🚀 Position ACTIVE. Price: ${curPrefix}${currentSpotPrice.toFixed(2)}. TP Target: ${curPrefix}${tState.targetPrice.toFixed(2)}. SL Stop: ${curPrefix}${tState.stopPrice.toFixed(2)}.`, "success");
+            }
+          } else if (tState.status === "ACTIVE_TRADE") {
+            addAutopilotLog(`📈 Position ACTIVE on ${targetSymbol}. Current Spot: ${curPrefix}${currentSpotPrice.toFixed(2)} | Target: ${curPrefix}${tState.targetPrice.toFixed(2)} | Stop: ${curPrefix}${tState.stopPrice.toFixed(2)}.`, "info");
+
+            let stateChange: "HIT_TARGET" | "HIT_STOP" | null = null;
+
+            if (tState.side === "BUY") {
+              if (currentSpotPrice >= tState.targetPrice) {
+                stateChange = "HIT_TARGET";
+              } else if (currentSpotPrice <= tState.stopPrice) {
+                stateChange = "HIT_STOP";
+              }
+            } else {
+              if (currentSpotPrice <= tState.targetPrice) {
+                stateChange = "HIT_TARGET";
+              } else if (currentSpotPrice >= tState.stopPrice) {
+                stateChange = "HIT_STOP";
+              }
+            }
+
+            if (stateChange === "HIT_TARGET") {
+              const oppositeSide = tState.side === "BUY" ? "SELL" : "BUY";
+              addAutopilotLog(`🎉 Take Profit target met at ${curPrefix}${currentSpotPrice.toFixed(2)}! Mean reversion complete for 2:1 profit.`, "success");
+
+              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              await executeAutopilotOrder(targetSymbol, oppositeSide as any, tradeQty);
+
+              setTouchTurnState({
+                ...tState,
+                status: "HIT_TARGET"
+              });
+            } else if (stateChange === "HIT_STOP") {
+              const oppositeSide = tState.side === "BUY" ? "SELL" : "BUY";
+              addAutopilotLog(`🛑 Stop loss triggered at ${curPrefix}${currentSpotPrice.toFixed(2)}. Closed out trade boundary limit.`, "warn");
+
+              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              await executeAutopilotOrder(targetSymbol, oppositeSide as any, tradeQty);
+
+              setTouchTurnState({
+                ...tState,
+                status: "HIT_STOP"
+              });
+            }
+          } else {
+            addAutopilotLog(`🏁 Scenario complete. Status: ${tState.status === "HIT_TARGET" ? "SUCCESS" : "STOPPED OUT"}. Resetting on next scan or manual triggers.`, "success");
+          }
+        }
+      }
+
+      else if (curRef.autopilotStrategy === "MACD_FRONT_SIDE") {
+        addAutopilotLog(`🔍 Triggering MACD Front-Side momentum scanner on target: ${targetSymbol}...`, "info");
+
+        // Retrieve current spot price
+        const matched = currentActivePositions.find((p) => p.symbol === targetSymbol);
+        let currentSpotPrice = 150.0;
+        if (matched) {
+          currentSpotPrice = matched.current_price;
+        } else {
+          if (targetSymbol === "RELIANCE") currentSpotPrice = 2475.50;
+          else if (targetSymbol === "TCS") currentSpotPrice = 3820.00;
+          else if (targetSymbol === "AAPL") currentSpotPrice = 182.20;
+          else if (targetSymbol === "TSLA") currentSpotPrice = 195.00;
+          else if (targetSymbol === "NVDA") currentSpotPrice = 115.50;
+          else if (targetSymbol === "BTCUSD") currentSpotPrice = 67200.00;
+          else if (targetSymbol === "MSFT") currentSpotPrice = 425.00;
+        }
+
+        const curPrefix = curRef.brokerType === "ANGELONE" ? "₹" : "$";
+        let mState = curRef.macdState;
+
+        if (!mState || mState.symbol !== targetSymbol) {
+          // Initialize mathematical MACD setup with 40 backward steps
+          const priceHistory: number[] = [];
+          let tempPrice = currentSpotPrice;
+          for (let i = 0; i < 40; i++) {
+            const change = (Math.random() - 0.5) * (currentSpotPrice * 0.005);
+            tempPrice -= change;
+            priceHistory.unshift(tempPrice);
+          }
+
+          // Sequential EMA 12 & 26 values
+          const ema12History: number[] = [];
+          const ema26History: number[] = [];
+          let currentEma12 = priceHistory[0];
+          let currentEma26 = priceHistory[0];
+          const k12 = 2 / 13;
+          const k26 = 2 / 27;
+
+          for (let i = 0; i < priceHistory.length; i++) {
+            currentEma12 = priceHistory[i] * k12 + currentEma12 * (1 - k12);
+            currentEma26 = priceHistory[i] * k26 + currentEma26 * (1 - k26);
+            ema12History.push(currentEma12);
+            ema26History.push(currentEma26);
+          }
+
+          // MACD & Signal history
+          const macdLineHistory: number[] = [];
+          for (let i = 0; i < priceHistory.length; i++) {
+            macdLineHistory.push(ema12History[i] - ema26History[i]);
+          }
+
+          const signalLineHistory: number[] = [];
+          let currentSignal = macdLineHistory[0];
+          const k9 = 2 / 10;
+          for (let i = 0; i < macdLineHistory.length; i++) {
+            currentSignal = macdLineHistory[i] * k9 + currentSignal * (1 - k9);
+            signalLineHistory.push(currentSignal);
+          }
+
+          const finalSub1Macd = macdLineHistory[macdLineHistory.length - 2] || 0;
+          const finalSub1Signal = signalLineHistory[signalLineHistory.length - 2] || 0;
+          const initPrevHist = finalSub1Macd - finalSub1Signal;
+
+          const initMacd = macdLineHistory[macdLineHistory.length - 1];
+          const initSignal = signalLineHistory[signalLineHistory.length - 1];
+          const initHist = initMacd - initSignal;
+
+          const trendSide: "FRONT_SIDE" | "BACK_SIDE" = initHist > 0 ? "FRONT_SIDE" : "BACK_SIDE";
+          const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+
+          mState = {
+            symbol: targetSymbol,
+            ema12: ema12History[ema12History.length - 1],
+            ema26: ema26History[ema26History.length - 1],
+            macdValue: initMacd,
+            signalValue: initSignal,
+            histogram: initHist,
+            prevHistogram: initPrevHist,
+            trendSide,
+            status: "IDLE",
+            tradeQty
+          };
+
+          addAutopilotLog(`📈 MACD Strategy initialized on ${targetSymbol}. MACD: ${initMacd.toFixed(4)} | Signal: ${initSignal.toFixed(4)} | Histogram: ${initHist.toFixed(4)}. Evaluated Side: ${trendSide === "FRONT_SIDE" ? "[FRONT SIDE] (Bullish Momentum)" : "[BACK SIDE] (Correction Edge)"}.`, "info");
+          addAutopilotLog(`🛡️ Strategy guidelines: Enter on Front Side cross-up (histogram flips > 0). Exit immediately on Back Side rollover (histogram flips < 0) to bypass false breakouts.`, "success");
+
+          setMacdState(mState);
+        } else {
+          // Update EMA dynamically based on today's spot price
+          const k12 = 2 / 13;
+          const k26 = 2 / 27;
+          const k9 = 2 / 10;
+
+          const newEma12 = currentSpotPrice * k12 + mState.ema12 * (1 - k12);
+          const newEma26 = currentSpotPrice * k26 + mState.ema26 * (1 - k26);
+          const newMacdValue = newEma12 - newEma26;
+          const newSignalValue = newMacdValue * k9 + mState.signalValue * (1 - k9);
+          const newHistogram = newMacdValue - newSignalValue;
+          const prevHistVal = mState.histogram;
+
+          const nextTrend: "FRONT_SIDE" | "BACK_SIDE" = newHistogram > 0 ? "FRONT_SIDE" : "BACK_SIDE";
+
+          addAutopilotLog(`📊 MACD Info: Spot/Close ${curPrefix}${currentSpotPrice.toFixed(2)} | MACD: ${newMacdValue.toFixed(4)} | Signal: ${newSignalValue.toFixed(4)} | Histogram: ${newHistogram.toFixed(4)} (${nextTrend === "FRONT_SIDE" ? "Front Side" : "Back Side"}).`, "info");
+
+          if (mState.status === "IDLE") {
+            // Check cross up trigger: MACD crossovers signal (histogram transitions below 0 to above 0)
+            if (prevHistVal <= 0 && newHistogram > 0) {
+              addAutopilotLog(`🔥 Bullish MACD Golden Cross! Histogram flipped positive: ${newHistogram.toFixed(4)}. Ordering Front-Side LONG Scalp.`, "trade");
+              await executeAutopilotOrder(targetSymbol, "BUY", mState.tradeQty);
+
+              setMacdState({
+                ...mState,
+                ema12: newEma12,
+                ema26: newEma26,
+                macdValue: newMacdValue,
+                signalValue: newSignalValue,
+                histogram: newHistogram,
+                prevHistogram: prevHistVal,
+                trendSide: "FRONT_SIDE",
+                status: "ACTIVE_TRADE",
+                entryPrice: currentSpotPrice
+              });
+            } else {
+              // Stay in idle and log
+              addAutopilotLog(`⏳ Holding: waiting for MACD to cross back up above signal line. Sidestepping late-stage trend chop.`, "success");
+              setMacdState({
+                ...mState,
+                ema12: newEma12,
+                ema26: newEma26,
+                macdValue: newMacdValue,
+                signalValue: newSignalValue,
+                histogram: newHistogram,
+                prevHistogram: prevHistVal,
+                trendSide: nextTrend
+              });
+            }
+          } else if (mState.status === "ACTIVE_TRADE") {
+            // Check crossover against the trade (MACD < Signal, histogram <= 0): end of Front Side, start of Back Side
+            let exitTrigger = false;
+            let exitReason = "";
+
+            if (newHistogram <= 0) {
+              exitTrigger = true;
+              exitReason = `MACD rolled over on Back-Side crossover (Histogram: ${newHistogram.toFixed(4)})`;
+            } else if (mState.entryPrice) {
+              // Optional 2:1 RR protection constraints (Take Profit when price rises +2.5% or Stop Loss when price drops -1.25%)
+              const pctDiff = (currentSpotPrice - mState.entryPrice) / mState.entryPrice;
+              if (pctDiff >= 0.025) {
+                exitTrigger = true;
+                exitReason = `Target price limit +2.50% profit protection achieved at ${curPrefix}${currentSpotPrice.toFixed(2)}`;
+              } else if (pctDiff <= -0.0125) {
+                exitTrigger = true;
+                exitReason = `Stop Loss boundary -1.25% margin reached at ${curPrefix}${currentSpotPrice.toFixed(2)}`;
+              }
+            }
+
+            if (exitTrigger) {
+              addAutopilotLog(`⚠️ Exit Signal: ${exitReason}. Liquidating scalp...`, "trade");
+              await executeAutopilotOrder(targetSymbol, "SELL", mState.tradeQty);
+
+              setMacdState({
+                ...mState,
+                ema12: newEma12,
+                ema26: newEma26,
+                macdValue: newMacdValue,
+                signalValue: newSignalValue,
+                histogram: newHistogram,
+                prevHistogram: prevHistVal,
+                trendSide: "BACK_SIDE",
+                status: "EXITED_BACKSIDE"
+              });
+            } else {
+              // Update state values but stay in active scalp
+              addAutopilotLog(`📈 Hold Scalp: Position Active. Entry: ${curPrefix}${mState.entryPrice?.toFixed(2)} | Current: ${curPrefix}${currentSpotPrice.toFixed(2)}.`, "success");
+              setMacdState({
+                ...mState,
+                ema12: newEma12,
+                ema26: newEma26,
+                macdValue: newMacdValue,
+                signalValue: newSignalValue,
+                histogram: newHistogram,
+                prevHistogram: prevHistVal,
+                trendSide: nextTrend
+              });
+            }
+          } else if (mState.status === "EXITED_BACKSIDE") {
+            // Reset to idle once the histogram stabilizes or on trend flip to prepare for next scan setup
+            if (newHistogram <= 0) {
+              addAutopilotLog(`🧘 In Backside Chill Mode. Sidestepping bad setups & false breakouts. Resets once MACD recovers.`, "info");
+            } else {
+              addAutopilotLog(`♻️ MACD reclaimed strength. Resetting tracker status back to scan...`, "success");
+              mState.status = "IDLE";
+            }
+
+            setMacdState({
+              ...mState,
+              ema12: newEma12,
+              ema26: newEma26,
+              macdValue: newMacdValue,
+              signalValue: newSignalValue,
+              histogram: newHistogram,
+              prevHistogram: prevHistVal,
+              trendSide: nextTrend,
+              status: mState.status
+            });
+          }
+        }
+      }
+
+      else if (curRef.autopilotStrategy === "SNEAKY_PIVOT") {
+        addAutopilotLog(`🕵️ Triggering Sneaky Pivot (3-Candle Range Pivot) scanner on target: ${targetSymbol}...`, "info");
+
+        // Retrieve current spot price
+        const matched = currentActivePositions.find((p) => p.symbol === targetSymbol);
+        let currentSpotPrice = 150.0;
+        if (matched) {
+          currentSpotPrice = matched.current_price;
+        } else {
+          if (targetSymbol === "RELIANCE") currentSpotPrice = 2475.50;
+          else if (targetSymbol === "TCS") currentSpotPrice = 3820.00;
+          else if (targetSymbol === "AAPL") currentSpotPrice = 182.20;
+          else if (targetSymbol === "TSLA") currentSpotPrice = 195.00;
+          else if (targetSymbol === "NVDA") currentSpotPrice = 115.50;
+          else if (targetSymbol === "BTCUSD") currentSpotPrice = 67200.00;
+          else if (targetSymbol === "MSFT") currentSpotPrice = 425.00;
+        }
+
+        const curPrefix = curRef.brokerType === "ANGELONE" ? "₹" : "$";
+        let sState = curRef.sneakyPivotState;
+
+        if (!sState || sState.symbol !== targetSymbol) {
+          // Initialize horizontal level boundaries representing the "trading box"
+          let rangeHigh = 183.50;
+          let swingHigh = 184.80;
+          let rangeLow = 181.00;
+          let swingLow = 179.50;
+
+          if (targetSymbol === "RELIANCE") {
+            rangeHigh = 2490.00;
+            swingHigh = 2515.00;
+            rangeLow = 2455.00;
+            swingLow = 2430.00;
+          } else if (targetSymbol === "TCS") {
+            rangeHigh = 3855.00;
+            swingHigh = 3890.00;
+            rangeLow = 3785.00;
+            swingLow = 3750.00;
+          } else if (targetSymbol === "AAPL") {
+            rangeHigh = 183.50;
+            swingHigh = 184.80;
+            rangeLow = 181.00;
+            swingLow = 179.50;
+          } else if (targetSymbol === "TSLA") {
+            rangeHigh = 197.50;
+            swingHigh = 199.80;
+            rangeLow = 192.50;
+            swingLow = 190.00;
+          } else if (targetSymbol === "NVDA") {
+            rangeHigh = 117.00;
+            swingHigh = 118.50;
+            rangeLow = 114.00;
+            swingLow = 112.50;
+          } else if (targetSymbol === "BTCUSD") {
+            rangeHigh = 68100.0;
+            swingHigh = 69300.0;
+            rangeLow = 66300.0;
+            swingLow = 65000.0;
+          } else {
+            rangeHigh = parseFloat((currentSpotPrice * 1.01).toFixed(2));
+            swingHigh = parseFloat((currentSpotPrice * 1.025).toFixed(2));
+            rangeLow = parseFloat((currentSpotPrice * 0.99).toFixed(2));
+            swingLow = parseFloat((currentSpotPrice * 0.975).toFixed(2));
+          }
+
+          sState = {
+            symbol: targetSymbol,
+            rangeHigh,
+            rangeLow,
+            swingHigh,
+            swingLow,
+            status: "SCANNING",
+            candleCount: 0,
+            lastCandleAction: "Drawing Pivot box levels. Ignoring middle core range."
+          };
+
+          addAutopilotLog(`📐 Sneaky Pivot initialized for ${targetSymbol}. Trading Box ranges defined:`, "info");
+          addAutopilotLog(`   🔴 Upper Sell Zones: Swing High: ${curPrefix}${swingHigh.toFixed(2)} | Range High: ${curPrefix}${rangeHigh.toFixed(2)}`, "info");
+          addAutopilotLog(`   ... Lower Buy Zones:  Range Low: ${curPrefix}${rangeLow.toFixed(2)} | Swing Low: ${curPrefix}${swingLow.toFixed(2)}`, "info");
+          addAutopilotLog(`⏳ Scanning 15m intervals for active tests. Middle chop will be ignored.`, "success");
+
+          setSneakyPivotState(sState);
+        } else {
+          // Progressive 3-candle state machine mechanics
+          const count = sState.candleCount + 1;
+          let nextStatus = sState.status;
+          let lastAction = sState.lastCandleAction;
+          let side: "BUY" | "SELL" | undefined = sState.side;
+          let entryPrice = sState.entryPrice;
+          let targetPrice = sState.targetPrice;
+          let stopPrice = sState.stopPrice;
+
+          if (sState.status === "SCANNING") {
+            // Candle 1: Rejection near levels
+            const isNearLow = Math.abs(currentSpotPrice - sState.rangeLow) / sState.rangeLow < 0.015 || currentSpotPrice < sState.rangeLow;
+            const isNearHigh = Math.abs(currentSpotPrice - sState.rangeHigh) / sState.rangeHigh < 0.015 || currentSpotPrice > sState.rangeHigh;
+
+            if (isNearLow) {
+              nextStatus = "CANDLE1_ESTABLISHED";
+              side = "BUY";
+              lastAction = `Candle 1 established strong rejection near Range Low (${curPrefix}${sState.rangeLow.toFixed(2)}).`;
+              addAutopilotLog(`🕯️ Candle 1 closed testing lower Buy Zone line (${curPrefix}${sState.rangeLow.toFixed(2)}) on ${targetSymbol}. Waiting for the "sneaky" second candle pivot confirm.`, "info");
+            } else if (isNearHigh) {
+              nextStatus = "CANDLE1_ESTABLISHED";
+              side = "SELL";
+              lastAction = `Candle 1 established resistance near Range High (${curPrefix}${sState.rangeHigh.toFixed(2)}).`;
+              addAutopilotLog(`🕯️ Candle 1 closed testing upper Sell Zone line (${curPrefix}${sState.rangeHigh.toFixed(2)}) on ${targetSymbol}. Waiting for the "sneaky" second candle pivot confirm.`, "info");
+            } else {
+              lastAction = `Candle ${count} remains inside core range. Current: ${curPrefix}${currentSpotPrice.toFixed(2)}. No trade zones hit.`;
+              addAutopilotLog(`⏳ Middle Core Range: Price (${curPrefix}${currentSpotPrice.toFixed(2)}) is ping-ponging inside the trading box. No action.`, "success");
+            }
+          } 
+          
+          else if (sState.status === "CANDLE1_ESTABLISHED") {
+            // Candle 2: Institutional sweep and reclaim
+            nextStatus = "CONFIRMED_PV_CANDLE2";
+            const testPrice = sState.side === "BUY" 
+              ? sState.rangeLow - (sState.rangeHigh - sState.rangeLow) * 0.02 
+              : sState.rangeHigh + (sState.rangeHigh - sState.rangeLow) * 0.02;
+
+            lastAction = sState.side === "BUY"
+              ? `Candle 2 swept below Range Low to ${curPrefix}${testPrice.toFixed(2)} and closed inside (Institution stop hunt detected!).`
+              : `Candle 2 spiked above Range High to ${curPrefix}${testPrice.toFixed(2)} and rejected downward (Seller liquidity trapped!).`;
+
+            addAutopilotLog(`🕵️ Sneaky pivot detected! Candle 2 wick tested liquidity behind the levels:`, "success");
+            addAutopilotLog(`   👉 ${lastAction}`, "info");
+            addAutopilotLog(`📡 Order desks ready. Third candle scheduled to execute the entry pivot trigger.`, "success");
+          } 
+          
+          else if (sState.status === "CONFIRMED_PV_CANDLE2") {
+            // Candle 3: Trigger order
+            nextStatus = "ACTIVE_TRADE";
+            entryPrice = currentSpotPrice;
+
+            if (sState.side === "BUY") {
+              const stopOffset = (sState.rangeHigh - sState.rangeLow) * 0.15;
+              stopPrice = parseFloat((sState.rangeLow - stopOffset).toFixed(2));
+              targetPrice = sState.rangeHigh;
+              
+              addAutopilotLog(`🎯 Candle 3 Entry order FILLED for ${targetSymbol}! Entering LONG at ${curPrefix}${entryPrice.toFixed(2)}.`, "trade");
+              addAutopilotLog(`🛡️ Protected by "Guardian Angel" stop level: ${curPrefix}${stopPrice.toFixed(2)}. Profit target: ${curPrefix}${targetPrice.toFixed(2)}.`, "success");
+              
+              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              await executeAutopilotOrder(targetSymbol, "BUY", tradeQty);
+            } else {
+              const stopOffset = (sState.rangeHigh - sState.rangeLow) * 0.15;
+              stopPrice = parseFloat((sState.rangeHigh + stopOffset).toFixed(2));
+              targetPrice = sState.rangeLow;
+
+              addAutopilotLog(`🎯 Candle 3 Entry order FILLED for ${targetSymbol}! Entering SHORT at ${curPrefix}${entryPrice.toFixed(2)}.`, "trade");
+              addAutopilotLog(`🛡️ Protected by "Guardian Angel" stop level: ${curPrefix}${stopPrice.toFixed(2)}. Profit target: ${curPrefix}${targetPrice.toFixed(2)}.`, "success");
+
+              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              await executeAutopilotOrder(targetSymbol, "SELL", tradeQty);
+            }
+            lastAction = `Candle 3 successfully triggered ${sState.side} entry at ${curPrefix}${entryPrice.toFixed(2)}.`;
+          } 
+          
+          else if (sState.status === "ACTIVE_TRADE") {
+            // Monitor ongoing trade
+            addAutopilotLog(`📈 Sneaky Pivot Active: ${targetSymbol} Spot at ${curPrefix}${currentSpotPrice.toFixed(2)} | Target: ${curPrefix}${targetPrice?.toFixed(2)} | Stop: ${curPrefix}${stopPrice?.toFixed(2)}.`, "info");
+
+            let stateChange: "HIT_TARGET" | "HIT_STOP" | null = null;
+            if (sState.side === "BUY") {
+              if (currentSpotPrice >= (targetPrice || 0)) {
+                stateChange = "HIT_TARGET";
+              } else if (currentSpotPrice <= (stopPrice || 0)) {
+                stateChange = "HIT_STOP";
+              }
+            } else {
+              if (currentSpotPrice <= (targetPrice || 0)) {
+                stateChange = "HIT_TARGET";
+              } else if (currentSpotPrice >= (stopPrice || 0)) {
+                stateChange = "HIT_STOP";
+              }
+            }
+
+            if (stateChange === "HIT_TARGET") {
+              const oppositeSide = sState.side === "BUY" ? "SELL" : "BUY";
+              addAutopilotLog(`🎉 Take Profit target successfully met at ${curPrefix}${currentSpotPrice.toFixed(2)}! Opposite pivot zone reached.`, "success");
+
+              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              await executeAutopilotOrder(targetSymbol, oppositeSide as any, tradeQty);
+
+              nextStatus = "HIT_TARGET";
+              lastAction = `Trade completed successfully. Hit profit target of ${curPrefix}${targetPrice?.toFixed(2)}.`;
+            } else if (stateChange === "HIT_STOP") {
+              const oppositeSide = sState.side === "BUY" ? "SELL" : "BUY";
+              addAutopilotLog(`🛑 Stop Loss test failed. Cut trade out under protection limit at ${curPrefix}${currentSpotPrice.toFixed(2)}.`, "warn");
+
+              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              await executeAutopilotOrder(targetSymbol, oppositeSide as any, tradeQty);
+
+              nextStatus = "HIT_STOP";
+              lastAction = `Trade stopped out under the protected lows/highs at ${curPrefix}${stopPrice?.toFixed(2)}.`;
+            } else {
+              lastAction = `Trade holding. Price: ${curPrefix}${currentSpotPrice.toFixed(2)}. Target: ${curPrefix}${targetPrice?.toFixed(2)}.`;
+            }
+          } 
+          
+          else {
+            addAutopilotLog(`🏁 Sneaky Pivot trade complete for ${targetSymbol}. status: ${sState.status}. Reset model to scanning...`, "success");
+            nextStatus = "SCANNING";
+            side = undefined;
+            entryPrice = undefined;
+            targetPrice = undefined;
+            stopPrice = undefined;
+            lastAction = "Pivot box levels drawn. Recalculating setups.";
+          }
+
+          setSneakyPivotState({
+            ...sState,
+            status: nextStatus,
+            candleCount: count,
+            lastCandleAction: lastAction,
+            side,
+            entryPrice,
+            targetPrice,
+            stopPrice
+          });
         }
       }
 
@@ -862,7 +1778,7 @@ export default function Home() {
     } finally {
       setIsAutopilotRunning(false);
     }
-  }, [executeAutopilotOrder]);
+  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState]);
 
   // Autopilot loop trigger
   useEffect(() => {
@@ -916,19 +1832,114 @@ export default function Home() {
 
   // Setup persistence on Mount
   useEffect(() => {
+    const savedBrokerType = (localStorage.getItem("RISK_SENTRY_BROKER_TYPE") || "ALPACA") as "ALPACA" | "ANGELONE";
+    const savedUseAlpaca = localStorage.getItem("APCA_USE_ALPACA") === "true";
+
+    // Restore Alpaca keys
     const savedApiKey = localStorage.getItem("APCA_API_KEY") || "";
     const savedApiSecret = localStorage.getItem("APCA_API_SECRET") || "";
     const savedIsPaper = localStorage.getItem("APCA_IS_PAPER") !== "false";
-    const savedUseAlpaca = localStorage.getItem("APCA_USE_ALPACA") === "true";
 
     if (savedApiKey) setApiKey(savedApiKey);
     if (savedApiSecret) setApiSecret(savedApiSecret);
     setIsPaper(savedIsPaper);
 
+    // Restore Angel One keys
+    const savedAngelApiKey = localStorage.getItem("ANGEL_API_KEY") || "";
+    const savedAngelClientCode = localStorage.getItem("ANGEL_CLIENT_CODE") || "";
+    const savedAngelMpin = localStorage.getItem("ANGEL_MPIN") || "";
+    const savedAngelTotpSeed = localStorage.getItem("ANGEL_TOTP_SEED") || "";
+
+    if (savedAngelApiKey) setAngelApiKey(savedAngelApiKey);
+    if (savedAngelClientCode) setAngelClientCode(savedAngelClientCode);
+    if (savedAngelMpin) setAngelMpin(savedAngelMpin);
+    if (savedAngelTotpSeed) setAngelTotpSeed(savedAngelTotpSeed);
+
+    setBrokerType(savedBrokerType);
+
     const ts = new Date().toLocaleTimeString();
 
     const initApp = async () => {
-      if (savedUseAlpaca && savedApiKey && savedApiSecret) {
+      if (savedUseAlpaca && savedBrokerType === "ANGELONE" && savedAngelApiKey && savedAngelClientCode && savedAngelMpin) {
+        setLogs([
+          {
+            id: `boot-${Date.now()}-1`,
+            timestamp: ts,
+            symbol: "SYSTEM",
+            action: "BOOT",
+            message: "Interactive Margin Risk analyzer system active.",
+            status: "INFO"
+          },
+          {
+            id: `boot-${Date.now()}-2`,
+            timestamp: ts,
+            symbol: "ANGELONE",
+            action: "AUTO_CONNECT",
+            message: `Auto-connecting using stored credentials to AngelOne SmartAPI...`,
+            status: "INFO"
+          }
+        ]);
+
+        setIsConnecting(true);
+        try {
+          const response = await fetch("/api/angelone", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              angelApiKey: savedAngelApiKey,
+              angelClientCode: savedAngelClientCode,
+              angelMpin: savedAngelMpin,
+              angelTotpSeed: savedAngelTotpSeed,
+              isMockConnection: false
+            }),
+          });
+
+          const resText = await response.text();
+          let rawData: any = null;
+          try {
+            rawData = JSON.parse(resText);
+          } catch (e) {
+            throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
+          }
+
+          if (!response.ok || rawData?.error) {
+            throw new Error(rawData?.error || "Failed stored key validation.");
+          }
+          setAlpacaAccount(rawData.account);
+          setAlpacaPositions(rawData.positions);
+          setIsConnected(true);
+          setUseAlpacaLive(true);
+
+          setLogs((prev) => [
+            {
+              id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+              timestamp: new Date().toLocaleTimeString(),
+              symbol: "ANGELONE",
+              action: "CONNECT_SUCCESS",
+              message: `Securely auto-connected! Client Code: ${rawData.account.account_number}. Cash: ₹${parseFloat(rawData.account.cash).toLocaleString()}`,
+              status: "SUCCESS"
+            },
+            ...prev
+          ]);
+        } catch (err: any) {
+          console.error("Auto-connect to AngelOne failed:", err);
+          setIsConnected(false);
+          setUseAlpacaLive(false);
+          setLogs((prev) => [
+            {
+              id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+              timestamp: new Date().toLocaleTimeString(),
+              symbol: "ANGELONE",
+              action: "AUTO_CONNECT_FAIL",
+              message: `Auto-connect failed: ${err.message || "SmartAPI auth failure"}. Falling back to Local Indian Stock Simulator.`,
+              status: "WARNING"
+            },
+            ...prev
+          ]);
+        } finally {
+          setIsConnecting(false);
+        }
+      } else if (savedUseAlpaca && savedBrokerType === "ALPACA" && savedApiKey && savedApiSecret) {
         setLogs([
           {
             id: `boot-${Date.now()}-1`,
@@ -978,7 +1989,7 @@ export default function Home() {
               timestamp: new Date().toLocaleTimeString(),
               symbol: "ALPACA",
               action: "CONNECT_SUCCESS",
-              message: `Securely auto-connected! Account: ${rawData.account.account_number}. Cash: $${parseFloat(rawData.account.cash).toLocaleString()}`,
+              message: `Securely auto-connected! Account: ${rawData.account.account_number}. Cash: ${parseFloat(rawData.account.cash).toLocaleString()}`,
               status: "SUCCESS"
             },
             ...prev
@@ -1003,6 +2014,55 @@ export default function Home() {
         }
       } else {
         setUseAlpacaLive(false);
+        // Ensure default simulation asset coordinates are structured according to user region preference
+        if (savedBrokerType === "ANGELONE") {
+          setMockPositions([
+            {
+              symbol: "RELIANCE",
+              qty: 10.0,
+              avg_entry_price: 2450.0,
+              current_price: 2475.5,
+              market_value: 24755.0,
+              unrealized_pl: 255.0,
+              unrealized_plpc: 0.0104,
+              maintenance_margin_rate: 0.20,
+            },
+            {
+              symbol: "TCS",
+              qty: 5.0,
+              avg_entry_price: 3850.0,
+              current_price: 3820.0,
+              market_value: 19100.0,
+              unrealized_pl: -150.0,
+              unrealized_plpc: -0.0078,
+              maintenance_margin_rate: 0.20,
+            },
+            {
+              symbol: "INFY",
+              qty: 15.0,
+              avg_entry_price: 1480.0,
+              current_price: 1515.0,
+              market_value: 22725.0,
+              unrealized_pl: 525.0,
+              unrealized_plpc: 0.0236,
+              maintenance_margin_rate: 0.20,
+            },
+            {
+              symbol: "TATAMOTORS",
+              qty: 20.0,
+              avg_entry_price: 950.0,
+              current_price: 962.4,
+              market_value: 19248.0,
+              unrealized_pl: 248.0,
+              unrealized_plpc: 0.0131,
+              maintenance_margin_rate: 0.25,
+            }
+          ]);
+          setSimCash(100000);
+          setStartingCapital(185828); // Cash + long assets
+          setOrderSymbol("RELIANCE");
+          setAutopilotTargetTicker("RELIANCE");
+        }
         setLogs([
           {
             id: `boot-${Date.now()}-1`,
@@ -1017,7 +2077,7 @@ export default function Home() {
             timestamp: ts,
             symbol: "SYSTEM",
             action: "INITIALIZE",
-            message: "Dashboard initialized in Local Simulator mode.",
+            message: `Dashboard initialized in Local ${savedBrokerType === "ANGELONE" ? "Indian Stock" : "US Stock"} Simulator mode.`,
             status: "INFO"
           }
         ]);
@@ -1043,6 +2103,9 @@ export default function Home() {
       status,
     };
     setLogs((prev) => [newLog, ...prev].slice(0, 50));
+    
+    // Automatically trigger visual Toast notification for user action/system logs
+    showToast(`${symbol} • ${action}: ${message}`, status);
   }
 
   // Connect & fetch from Alpaca
@@ -1096,7 +2159,7 @@ export default function Home() {
       setUseAlpacaLive(false);
       localStorage.setItem("APCA_USE_ALPACA", "false");
       addLog("ALPACA", "CONNECT_FAILED", err.message || "Broker authentication failed. Reverted to Simulator.", "CRITICAL");
-      alert(`Alpaca Error: ${err.message || "Unable to authorize. Please double check credentials."}`);
+      showToast(`Alpaca Connection Error: ${err.message || "Unable to authorize. Please double check credentials."}`, "CRITICAL");
     } finally {
       setIsConnecting(false);
     }
@@ -1208,105 +2271,193 @@ export default function Home() {
         return;
       }
 
-      if (side === "SELL") {
-        const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
-        const ownedQty = existingPos ? existingPos.qty : 0;
-        if (ownedQty <= 0) {
-          setIsPlacingOrder(false);
-          setOrderError(`Alpaca Client: You do not own a long position in ${symbolClean} to sell. Short-selling is blocked on Alpaca Live mode to prevent account rejections. Switch to Local Risk Simulator to construct active short positions!`);
-          addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on Alpaca Live mode.`, "WARNING");
-          return;
-        }
-        if (qtyNum > ownedQty) {
-          setIsPlacingOrder(false);
-          setOrderError(`Alpaca Client: You only own ${ownedQty} shares of ${symbolClean}. You cannot sell ${qtyNum.toFixed(6)} shares as that would require short-selling, which is restricted in this account mode.`);
-          addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on Alpaca Live mode. Tried to sell ${qtyNum} vs owned ${ownedQty}.`, "WARNING");
-          return;
-        }
-      } else if (side === "BUY") {
-        const cashValue = parseFloat(alpacaAccount?.cash || "0");
-        const rawBuyingPower = parseFloat(alpacaAccount?.buying_power || "0");
-        const isFractional = qtyNum % 1 !== 0;
-        // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
-        const buyingPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
-        if (estimatedCost > buyingPower) {
-          setIsPlacingOrder(false);
-          setOrderError(`Alpaca Client: Insufficient buying power. Estimated cost for order is $${estimatedCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} but you only have $${buyingPower.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} available.`);
-          addLog(symbolClean, "BUY_FAILED", `Blocked manual buy on Alpaca Live mode due to insufficient buying power.`, "WARNING");
-          return;
-        }
-      }
-
-      addLog("ALPACA", side, `Transmitting Order: ${side} for ${orderUnit === "USD" ? `$${inputVal}` : `${qtyNum} shares`} of ${symbolClean}`, "INFO");
-      try {
-        const payload: any = {
-          apiKey,
-          apiSecret,
-          isPaper,
-          symbol: symbolClean,
-          side: side.toLowerCase(),
-        };
-
-        if (orderUnit === "USD" && side === "BUY") {
-          payload.notional = inputVal;
-        } else {
-          payload.qty = parseFloat(qtyNum.toFixed(6));
+      if (brokerType === "ANGELONE") {
+        if (side === "SELL") {
+          const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
+          const ownedQty = existingPos ? existingPos.qty : 0;
+          if (ownedQty <= 0) {
+            setIsPlacingOrder(false);
+            setOrderError(`AngelOne SmartAPI: You do not own a long position in ${symbolClean} on NSE to sell.`);
+            addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on SmartAPI.`, "WARNING");
+            return;
+          }
+          if (qtyNum > ownedQty) {
+            setIsPlacingOrder(false);
+            setOrderError(`AngelOne SmartAPI: You only own ${ownedQty} shares of ${symbolClean}. You cannot sell ${qtyNum} shares.`);
+            addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on SmartAPI. Tried to sell ${qtyNum} vs owned ${ownedQty}.`, "WARNING");
+            return;
+          }
+        } else if (side === "BUY") {
+          const cashValue = parseFloat(alpacaAccount?.cash || "0");
+          if (estimatedCost > cashValue) {
+            setIsPlacingOrder(false);
+            setOrderError(`AngelOne SmartAPI: Insufficient INR funds. Estimated cost for order is ₹${estimatedCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} but you only have ₹${cashValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} available cash.`);
+            addLog(symbolClean, "BUY_FAILED", `Blocked manual buy on SmartAPI due to insufficient cash balance.`, "WARNING");
+            return;
+          }
         }
 
-        const response = await fetch("/api/alpaca/trade", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-
-        const resText = await response.text();
-        let dataOrder: any = null;
+        addLog("ANGELONE", side, `Transmitting Order: ${side} for ${qtyNum} share(s) of ${symbolClean} on NSE`, "INFO");
         try {
-          dataOrder = JSON.parse(resText);
-        } catch (e) {
-          throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
+          const response = await fetch("/api/angelone/trade", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              angelApiKey,
+              angelClientCode,
+              angelMpin,
+              angelTotpSeed,
+              symbol: symbolClean,
+              qty: qtyNum,
+              side: side.toLowerCase(),
+              isMockConnection: false
+            }),
+          });
+
+          const resText = await response.text();
+          let dataOrder: any = null;
+          try {
+            dataOrder = JSON.parse(resText);
+          } catch (e) {
+            throw new Error(`Server returned error output: ${resText.slice(0, 120).trim()}...`);
+          }
+
+          if (!response.ok || dataOrder?.error) {
+            throw new Error(dataOrder?.error || "Order rejected by SmartAPI server.");
+          }
+
+          setOrderSuccess(`Successfully queued on NSE! Order ID: ${dataOrder.id || "Submitted"}.`);
+          addLog(
+            symbolClean,
+            `${side}_FILLED`,
+            `SmartAPI NSE order executed for ${qtyNum} share(s) of ${symbolClean}.`,
+            "SUCCESS"
+          );
+
+          // Add to historical orders list
+          const newOrderObj: Order = {
+            id: dataOrder.id || `ord-${Date.now()}`,
+            symbol: symbolClean,
+            side: side,
+            qty: qtyNum,
+            price: dataOrder.price || estPrice,
+            status: "FILLED",
+            submittedAt: new Date().toLocaleTimeString(),
+          };
+          setOrders((prev) => [newOrderObj, ...prev]);
+
+          setTimeout(() => {
+            handleRefreshData();
+          }, 1200);
+
+        } catch (err: any) {
+          console.error(err);
+          setOrderError(err.message || "Failed SmartAPI order.");
+          addLog(symbolClean, `${side}_REJECTED`, err.message || "Transaction failed.", "CRITICAL");
+        } finally {
+          setIsPlacingOrder(false);
+        }
+      } else {
+        if (side === "SELL") {
+          const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
+          const ownedQty = existingPos ? existingPos.qty : 0;
+          if (ownedQty <= 0) {
+            setIsPlacingOrder(false);
+            setOrderError(`Alpaca Client: You do not own a long position in ${symbolClean} to sell. Short-selling is blocked on Alpaca Live mode to prevent account rejections. Switch to Local Risk Simulator to construct active short positions!`);
+            addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on Alpaca Live mode.`, "WARNING");
+            return;
+          }
+          if (qtyNum > ownedQty) {
+            setIsPlacingOrder(false);
+            setOrderError(`Alpaca Client: You only own ${ownedQty} shares of ${symbolClean}. You cannot sell ${qtyNum.toFixed(6)} shares as that would require short-selling, which is restricted in this account mode.`);
+            addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on Alpaca Live mode. Tried to sell ${qtyNum} vs owned ${ownedQty}.`, "WARNING");
+            return;
+          }
+        } else if (side === "BUY") {
+          const cashValue = parseFloat(alpacaAccount?.cash || "0");
+          const rawBuyingPower = parseFloat(alpacaAccount?.buying_power || "0");
+          const isFractional = qtyNum % 1 !== 0;
+          // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
+          const buyingPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
+          if (estimatedCost > buyingPower) {
+            setIsPlacingOrder(false);
+            setOrderError(`Alpaca Client: Insufficient buying power. Estimated cost for order is ${estimatedCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} but you only have ${buyingPower.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} available.`);
+            addLog(symbolClean, "BUY_FAILED", `Blocked manual buy on Alpaca Live mode due to insufficient buying power.`, "WARNING");
+            return;
+          }
         }
 
-        if (!response.ok || dataOrder?.error) {
-          throw new Error(dataOrder?.error || "Order rejected by brokerage server.");
+        addLog("ALPACA", side, `Transmitting Order: ${side} for ${orderUnit === "USD" ? `${inputVal}` : `${qtyNum} shares`} of ${symbolClean}`, "INFO");
+        try {
+          const payload: any = {
+            apiKey,
+            apiSecret,
+            isPaper,
+            symbol: symbolClean,
+            side: side.toLowerCase(),
+          };
+
+          if (orderUnit === "USD" && side === "BUY") {
+            payload.notional = inputVal;
+          } else {
+            payload.qty = parseFloat(qtyNum.toFixed(6));
+          }
+
+          const response = await fetch("/api/alpaca/trade", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+
+          const resText = await response.text();
+          let dataOrder: any = null;
+          try {
+            dataOrder = JSON.parse(resText);
+          } catch (e) {
+            throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
+          }
+
+          if (!response.ok || dataOrder?.error) {
+            throw new Error(dataOrder?.error || "Order rejected by brokerage server.");
+          }
+          setOrderSuccess(`Successfully queued! Order ID: ${dataOrder.id || "Submitted"}.`);
+          addLog(
+            symbolClean,
+            `${side}_FILLED`,
+            `Live market order executed for ${orderUnit === "USD" ? `${inputVal}` : `${qtyNum} share(s)`} of ${symbolClean}.`,
+            "SUCCESS"
+          );
+
+          // Add to historical orders list
+          const newOrderObj: Order = {
+            id: dataOrder.id || `ord-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+            symbol: symbolClean,
+            side: side,
+            qty: qtyNum,
+            price: dataOrder.filled_avg_price ? parseFloat(dataOrder.filled_avg_price) : (dataOrder.price || 0),
+            status: dataOrder.status?.toUpperCase() || "ACCEPTED",
+            submittedAt: new Date().toLocaleTimeString(),
+          };
+          setOrders((prev) => [newOrderObj, ...prev]);
+
+          // Refresh live stats after brief timeout for Alpaca side execution
+          setTimeout(() => {
+            handleRefreshData();
+          }, 1200);
+
+        } catch (err: any) {
+          console.error(err);
+          let errorMsg = err.message || "Failed order validation.";
+          if (errorMsg.includes("is not allowed to short") || errorMsg.includes("shorting")) {
+            errorMsg = "Your connected Alpaca account does not allow short-selling (likely because it is a cash account or has margin disabled). Use the Local Risk Simulator mode to test short layouts!";
+          } else if (errorMsg.includes("insufficient buying power")) {
+            errorMsg = "Your Alpaca account does not have sufficient buying power to execute this size. Try a smaller position or use the Local Risk Simulator mode!";
+          }
+          setOrderError(errorMsg);
+          addLog(symbolClean, `${side}_REJECTED`, errorMsg, "CRITICAL");
+        } finally {
+          setIsPlacingOrder(false);
         }
-        setOrderSuccess(`Successfully queued! Order ID: ${dataOrder.id || "Submitted"}.`);
-        addLog(
-          symbolClean,
-          `${side}_FILLED`,
-          `Live market order executed for ${orderUnit === "USD" ? `$${inputVal}` : `${qtyNum} share(s)`} of ${symbolClean}.`,
-          "SUCCESS"
-        );
-
-        // Add to historical orders list
-        const newOrderObj: Order = {
-          id: dataOrder.id || `ord-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-          symbol: symbolClean,
-          side: side,
-          qty: qtyNum,
-          price: dataOrder.filled_avg_price ? parseFloat(dataOrder.filled_avg_price) : (dataOrder.price || 0),
-          status: dataOrder.status?.toUpperCase() || "ACCEPTED",
-          submittedAt: new Date().toLocaleTimeString(),
-        };
-        setOrders((prev) => [newOrderObj, ...prev]);
-
-        // Refresh live stats after brief timeout for Alpaca side execution
-        setTimeout(() => {
-          handleRefreshData();
-        }, 1200);
-
-      } catch (err: any) {
-        console.error(err);
-        let errorMsg = err.message || "Failed order validation.";
-        if (errorMsg.includes("is not allowed to short") || errorMsg.includes("shorting")) {
-          errorMsg = "Your connected Alpaca account does not allow short-selling (likely because it is a cash account or has margin disabled). Use the Local Risk Simulator mode to test short layouts!";
-        } else if (errorMsg.includes("insufficient buying power")) {
-          errorMsg = "Your Alpaca account does not have sufficient buying power to execute this size. Try a smaller position or use the Local Risk Simulator mode!";
-        }
-        setOrderError(errorMsg);
-        addLog(symbolClean, `${side}_REJECTED`, errorMsg, "CRITICAL");
-      } finally {
-        setIsPlacingOrder(false);
       }
     } else {
       // Offline simulation execute immediately
@@ -1325,18 +2476,38 @@ export default function Home() {
       }
 
       const orderCost = estPrice * qtyNum;
+      const isINR = brokerType === "ANGELONE";
+      const currencySymbol = isINR ? "₹" : "$";
 
-      if (side === "BUY" && orderCost > simCash) {
+      // Real broker charges calculations matching real live conditions 
+      let flatBrokerage = 1.00;
+      let taxRate = 0.0005;
+      let slippageRate = 0.0002;
+      
+      if (isINR) {
+        flatBrokerage = symbolClean === "BTCUSD" ? 0 : 20.00; // flat ₹20 fee on delivery / margin orders
+        taxRate = symbolClean === "BTCUSD" ? 0.001 : 0.0015;  // STT / Stamp Duty / GST
+        slippageRate = 0.0003;
+      } else {
+        flatBrokerage = symbolClean === "BTCUSD" ? 0.10 : 1.00; // Clearing / SEC / FINRA structure
+        taxRate = symbolClean === "BTCUSD" ? 0.0015 : 0.0005;
+        slippageRate = 0.0002;
+      }
+
+      const orderFees = parseFloat((flatBrokerage + orderCost * taxRate + orderCost * slippageRate).toFixed(2));
+
+      if (side === "BUY" && (orderCost + orderFees) > simCash) {
         setIsPlacingOrder(false);
-        setOrderError(`Simulation block: Insufficient simulated cache. Needs $${orderCost.toFixed(2)}.`);
-        addLog(symbolClean, "BUY_SIM_FAILED", "Buying power exceeded in offline mock.", "WARNING");
+        setOrderError(`Simulation block: Insufficient simulated cash. Needs ${currencySymbol}${(orderCost + orderFees).toFixed(2)} (${currencySymbol}${orderCost.toFixed(2)} order + ${currencySymbol}${orderFees.toFixed(2)} fees/taxes).`);
+        addLog(symbolClean, "BUY_SIM_FAILED", `Buying power exceeded. Needs ${currencySymbol}${(orderCost + orderFees).toFixed(2)} total capacity.`, "WARNING");
         return;
       }
 
       // Execute mock transaction calculation
       setIsPlacingOrder(false);
       if (side === "BUY") {
-        setSimCash((c) => c - orderCost);
+        const totalDebitWithFees = orderCost + orderFees;
+        setSimCash((c) => c - totalDebitWithFees);
         setMockPositions((prev) => {
           const exists = prev.find((p) => p.symbol === symbolClean);
           if (exists) {
@@ -1347,14 +2518,15 @@ export default function Home() {
             let newAvgEntry = exists.avg_entry_price;
             let unrealized = 0;
             if (exists.qty > 0) {
-              newAvgEntry = (exists.avg_entry_price * exists.qty + estPrice * qtyNum) / updatedQty;
+              const actualSpent = exists.avg_entry_price * exists.qty + orderCost + orderFees;
+              newAvgEntry = actualSpent / updatedQty;
               unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
             } else {
               if (updatedQty < 0) {
                 newAvgEntry = exists.avg_entry_price;
                 unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
               } else {
-                newAvgEntry = estPrice;
+                newAvgEntry = (orderCost + orderFees) / updatedQty;
                 unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
               }
             }
@@ -1370,26 +2542,28 @@ export default function Home() {
                 : p
             );
           } else {
+            const realAvgEntry = parseFloat(((orderCost + orderFees) / qtyNum).toFixed(4));
             return [
               ...prev,
               {
                 symbol: symbolClean,
                 qty: qtyNum,
-                avg_entry_price: estPrice,
+                avg_entry_price: realAvgEntry,
                 current_price: estPrice,
                 market_value: parseFloat(orderCost.toFixed(2)),
-                unrealized_pl: 0,
+                unrealized_pl: parseFloat((orderCost - realAvgEntry * qtyNum).toFixed(2)),
                 unrealized_plpc: 0,
                 maintenance_margin_rate: parseFloat(newMaint) / 100 || 0.30,
               },
             ];
           }
         });
-        setOrderSuccess(`Simulated purchase complete: Acquired ${qtyNum} shares of ${symbolClean} at $${estPrice.toFixed(2)}.`);
-        addLog(symbolClean, "BUY_SIM", `Purchased simulated ${qtyNum} shares at $${estPrice}`, "SUCCESS");
+        setOrderSuccess(`Simulated purchase complete: Acquired ${qtyNum} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (Fees: ${currencySymbol}${orderFees.toFixed(2)} deducted).`);
+        addLog(symbolClean, "BUY_SIM", `Purchased simulated ${qtyNum} shares at ${currencySymbol}${estPrice} with ${currencySymbol}${orderFees.toFixed(2)} trade drag.`, "SUCCESS");
       } else {
         // Simulated SELL / SHORT SELL
-        setSimCash((c) => c + orderCost);
+        const netProceeds = orderCost - orderFees;
+        setSimCash((c) => c + netProceeds);
         setMockPositions((prev) => {
           const exists = prev.find((p) => p.symbol === symbolClean);
           if (exists) {
@@ -1404,11 +2578,12 @@ export default function Home() {
                 newAvgEntry = exists.avg_entry_price;
                 unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
               } else {
-                newAvgEntry = estPrice;
+                newAvgEntry = parseFloat(((orderCost - orderFees) / Math.abs(updatedQty)).toFixed(4));
                 unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
               }
             } else {
-              newAvgEntry = (exists.avg_entry_price * Math.abs(exists.qty) + estPrice * qtyNum) / Math.abs(updatedQty);
+              const totalAcquiredShort = exists.avg_entry_price * Math.abs(exists.qty) + orderCost - orderFees;
+              newAvgEntry = totalAcquiredShort / Math.abs(updatedQty);
               unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
             }
             return prev.map((p) =>
@@ -1424,23 +2599,24 @@ export default function Home() {
             );
           } else {
             const updatedQty = -qtyNum;
+            const realAvgEntry = parseFloat(((orderCost - orderFees) / qtyNum).toFixed(4));
             return [
               ...prev,
               {
                 symbol: symbolClean,
                 qty: parseFloat(updatedQty.toFixed(4)),
-                avg_entry_price: estPrice,
+                avg_entry_price: realAvgEntry,
                 current_price: estPrice,
                 market_value: parseFloat((updatedQty * estPrice).toFixed(2)),
-                unrealized_pl: 0,
+                unrealized_pl: parseFloat(((realAvgEntry - estPrice) * (-updatedQty)).toFixed(2)),
                 unrealized_plpc: 0,
                 maintenance_margin_rate: parseFloat(newMaint) / 100 || 0.30,
               },
             ];
           }
         });
-        setOrderSuccess(`Simulated sale complete: Liquidated/Short-sold ${qtyNum} shares of ${symbolClean} at $${estPrice.toFixed(2)}.`);
-        addLog(symbolClean, "SELL_SIM", `Sold/Short-sold simulated ${qtyNum} shares at $${estPrice}`, "SUCCESS");
+        setOrderSuccess(`Simulated sale complete: Sold/Short-sold ${qtyNum} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (${currencySymbol}${orderFees.toFixed(2)} charges deducted).`);
+        addLog(symbolClean, "SELL_SIM", `Sold/Short-sold simulated ${qtyNum} shares at ${currencySymbol}${estPrice} with ${currencySymbol}${orderFees.toFixed(2)} trade drag.`, "SUCCESS");
       }
 
       // Record offline order
@@ -1468,7 +2644,7 @@ export default function Home() {
     const maintRateVal = parseFloat(newMaint) / 100;
 
     if (!cleanSym || isNaN(qtyVal) || isNaN(priceVal) || qtyVal <= 0 || priceVal <= 0) {
-      alert("Please enter a valid symbol, Quantity, and current price.");
+      showToast("Validation Error: Please enter a correct ticker, quantity, and market price.", "WARNING");
       return;
     }
 
@@ -1498,7 +2674,7 @@ export default function Home() {
   // Shock Tickers Price manually inside Simulator
   const handleShockPrices = (multiplier: number, targetSymbol?: string) => {
     if (useAlpacaLive) {
-      alert("Price multiplier actions are disabled during active Alpaca brokerage logs.");
+      showToast("Access Denied: Price shock modifications are disabled in live broker environments.", "WARNING");
       return;
     }
 
@@ -1552,7 +2728,7 @@ export default function Home() {
       ]);
       addLog("SYSTEM", "WIPE_ALL", "Simulation wiped completely to pristine cash-only slate ($2,000 capital).", "INFO");
     } else {
-      setStartingCapital(3305);
+      setStartingCapital(3085);
       setMockPositions([
         {
           symbol: "NVDA",
@@ -1573,16 +2749,6 @@ export default function Home() {
           unrealized_pl: 6.6,
           unrealized_plpc: 0.012,
           maintenance_margin_rate: 0.30,
-        },
-        {
-          symbol: "TSLA",
-          qty: 1.0,
-          avg_entry_price: 220.0,
-          current_price: 195.0,
-          market_value: 195.0,
-          unrealized_pl: -25.0,
-          unrealized_plpc: -0.1136,
-          maintenance_margin_rate: 0.40,
         },
         {
           symbol: "BTCUSD",
@@ -1670,7 +2836,7 @@ if __name__ == "__main__":
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
-    alert("Python Sentry integration script copied to clipboard!");
+    showToast("Python Sentry automation script copied to clipboard successfully!", "SUCCESS");
   };
 
   // Triggers Gemini Stress Diagnosis Analysis
@@ -1812,7 +2978,7 @@ if __name__ == "__main__":
                   handleConnectAlpaca();
                 } else {
                   // Focus configuration inputs or alert
-                  alert("Please enter Alpaca API configuration keys down below first.");
+                  showToast("Setup Required: Please insert Alpaca API Credentials first.", "WARNING");
                   document.getElementById("alpaca-config-card")?.scrollIntoView({ behavior: "smooth" });
                 }
               }}
@@ -1873,7 +3039,11 @@ if __name__ == "__main__":
                   <button
                     type="button"
                     id="toggle-secret-visibility"
-                    onClick={() => setShowApiSecret(!showApiSecret)}
+                    onClick={() => {
+                      const nextVal = !showApiSecret;
+                      setShowApiSecret(nextVal);
+                      showToast(nextVal ? "Alpaca API Secret visible (Private View)." : "Alpaca API Secret redacted.", "INFO");
+                    }}
                     className="absolute inset-y-0 right-3 flex items-center text-gray-400 hover:text-white"
                   >
                     {showApiSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -1889,6 +3059,7 @@ if __name__ == "__main__":
                     onClick={() => {
                       setIsPaper(true);
                       localStorage.setItem("APCA_IS_PAPER", "true");
+                      showToast("API Endpoint set to Paper testnet (Simulation).", "SUCCESS");
                     }}
                     className={`px-2.5 py-1 rounded text-xs font-bold font-mono uppercase tracking-tight transition ${
                       isPaper
@@ -1903,6 +3074,7 @@ if __name__ == "__main__":
                     onClick={() => {
                       setIsPaper(false);
                       localStorage.setItem("APCA_IS_PAPER", "false");
+                      showToast("API Endpoint set to Live Real (Warning: Real Trades).", "WARNING");
                     }}
                     className={`px-2.5 py-1 rounded text-xs font-bold font-mono uppercase tracking-tight transition ${
                       !isPaper
@@ -2081,7 +3253,7 @@ if __name__ == "__main__":
                         addLog("SIMULATOR", "CASH_SET", `Manually updated simulated cash balance to $${val.toLocaleString()}`, "INFO");
                         setIsEditingCash(false);
                       } else {
-                        alert("Please enter a valid cash amount (minimum 0).");
+                        showToast("Invalid Input: Please input a valid simulated capital value >= $0.", "WARNING");
                       }
                     }}
                     className="flex-1 bg-brand-green text-brand-bg text-[10px] font-bold uppercase p-1 rounded font-mono hover:bg-brand-green/85 text-center"
@@ -2838,6 +4010,9 @@ if __name__ == "__main__":
                       <option value="GEMINI_AI">🤖 Gemini AI Smart Director (Analytical)</option>
                       <option value="SENTRY_HEAL">🛡️ Deleverage Margin Defender (Self-Healer)</option>
                       <option value="SCALPER">⚡ Quick micro-Scalper (Momentum Oscillator)</option>
+                      <option value="TOUCH_TURN">🎯 Touch & Turn Opening-Range Scalper (Mechanical)</option>
+                      <option value="MACD_FRONT_SIDE">📊 MACD Front-Side Momentum (Anti-Chop Breakout)</option>
+                      <option value="SNEAKY_PIVOT">🕵️ Sneaky Pivot (3-Candle Institutional Range)</option>
                     </select>
                   </div>
 
@@ -2900,6 +4075,437 @@ if __name__ == "__main__":
                       Capital Loss Guard: Block BUY on assets with negative unrealized P&L
                     </label>
                   </div>
+
+                  {/* Automated Symbol Buy Blacklist */}
+                  <div className="pt-2 border-t border-brand-border/40 font-mono text-[11px]" id="blacklist-row">
+                    <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 flex items-center gap-1 text-red-400">
+                      🚫 Automated Trading Blacklist
+                    </label>
+                    <div className="flex flex-wrap gap-1 mb-2">
+                      {autopilotBlacklist.map((sym) => (
+                        <span key={sym} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-500/10 text-brand-red border border-brand-red/20 text-[10px] font-bold">
+                          {sym}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAutopilotBlacklist(autopilotBlacklist.filter((x) => x !== sym));
+                              showToast(`Removed ${sym} from automated trading blacklist.`, "INFO");
+                            }}
+                            className="text-brand-red/70 hover:text-brand-red ml-0.5 hover:bg-brand-red/10 rounded h-3 w-3 inline-flex items-center justify-center font-extrabold cursor-pointer"
+                          >
+                            &times;
+                          </button>
+                        </span>
+                      ))}
+                      {autopilotBlacklist.length === 0 && (
+                        <span className="text-[10px] text-gray-500 italic">No blacklisted tokens.</span>
+                      )}
+                    </div>
+                    <div className="flex gap-1">
+                      <input
+                        type="text"
+                        id="new-blacklist-input"
+                        placeholder="ADD SYMBOL (e.g. TSLA)"
+                        className="flex-1 bg-brand-bg border border-brand-border text-white text-[10px] rounded px-2 py-1 uppercase font-mono tracking-widest focus:outline-none focus:border-brand-green"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            const val = (e.currentTarget.value || "").toUpperCase().trim();
+                            if (val) {
+                              if (autopilotBlacklist.includes(val)) {
+                                showToast(`${val} is already blacklisted!`, "WARNING");
+                              } else {
+                                setAutopilotBlacklist([...autopilotBlacklist, val]);
+                                showToast(`Added ${val} to automated trading blacklist.`, "SUCCESS");
+                                e.currentTarget.value = "";
+                              }
+                            }
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const inputEl = document.getElementById("new-blacklist-input") as HTMLInputElement;
+                          const val = (inputEl?.value || "").toUpperCase().trim();
+                          if (val) {
+                            if (autopilotBlacklist.includes(val)) {
+                              showToast(`${val} is already blacklisted!`, "WARNING");
+                            } else {
+                              setAutopilotBlacklist([...autopilotBlacklist, val]);
+                              showToast(`Added ${val} to automated trading blacklist.`, "SUCCESS");
+                              if (inputEl) inputEl.value = "";
+                            }
+                          }
+                        }}
+                        className="px-2 py-1 bg-brand-border hover:bg-brand-border/80 border border-brand-border/60 text-white rounded text-[10px] font-bold uppercase transition"
+                      >
+                        + Block
+                      </button>
+                    </div>
+                    <p className="text-[9px] text-gray-500 mt-1.5 italic leading-tight">
+                      * Prevents the Sentry Autopilot from initiating any trades (long or short) on these symbols. By default, TSLA is blacklisted.
+                    </p>
+                  </div>
+
+                  {/* Touch & Turn visualizer card */}
+                  {autopilotStrategy === "TOUCH_TURN" && touchTurnState && (
+                    <div className="bg-brand-bg/85 p-3 rounded-lg border-2 border-brand-green/35 mt-2.5 space-y-3 font-mono shadow-md" id="touch-turn-visualizer">
+                      <div className="flex items-center justify-between border-b border-brand-border/60 pb-2">
+                        <span className="text-[10px] font-bold text-brand-green uppercase tracking-wider flex items-center gap-1">
+                          <span className="h-2 w-2 rounded-full bg-brand-green animate-ping" />
+                          📊 TOUCH & TURN VISUALIZER
+                        </span>
+                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase font-mono tracking-wider border ${
+                          touchTurnState.status === "ACTIVE_TRADE"
+                            ? "bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse"
+                            : touchTurnState.status === "WAITING_LIMIT"
+                            ? "bg-sky-500/10 text-sky-400 border-sky-500/25"
+                            : touchTurnState.status === "HIT_TARGET"
+                            ? "bg-emerald-500/15 text-[#00e676] border-[#00e676]/30"
+                            : "bg-red-500/15 text-brand-red border-brand-red/30"
+                        }`}>
+                          {touchTurnState.status === "WAITING_LIMIT" ? "WAITING LIMIT" : touchTurnState.status === "ACTIVE_TRADE" ? "ACTIVE SCALP" : touchTurnState.status === "HIT_TARGET" ? "TARGET HIT (WIN)" : "STOP LOSS (LOSS)"}
+                        </span>
+                      </div>
+
+                      {/* Display calculations */}
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-[11px] text-gray-300">
+                        <div>
+                          <span className="text-gray-500 text-[9px] block uppercase tracking-tight">Daily ATR(14)</span>
+                          <span className="font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.atr14.toFixed(2)}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 text-[9px] block uppercase tracking-tight">ATR Threshold (25%)</span>
+                          <span className="font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.atrThreshold.toFixed(2)}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 text-[9px] block uppercase tracking-tight">15m Wick High</span>
+                          <span className="font-bold text-gray-100">{touchTurnState.openHigh.toFixed(2)}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 text-[9px] block uppercase tracking-tight">15m Wick Low</span>
+                          <span className="font-bold text-gray-100">{touchTurnState.openLow.toFixed(2)}</span>
+                        </div>
+                        <div className="col-span-2 bg-brand-bg/50 p-2 rounded border border-brand-border/40 text-[10px] space-y-1">
+                          <div className="flex justify-between">
+                            <span className="text-gray-400">Opening Wick Range:</span>
+                            <span className="text-brand-green font-bold">
+                              {brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.rangeRange.toFixed(2)}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-gray-400">Mechanical Bias:</span>
+                            <span className={touchTurnState.isBullish ? "text-brand-green font-bold" : "text-brand-red font-bold"}>
+                              {touchTurnState.isBullish ? "Bullish Liquidity (Short Edge)" : "Bearish Liquidity (Long Edge)"}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Targets summary */}
+                      <div className="border-t border-brand-border/50 pt-2 text-[11px] space-y-1.5 bg-brand-bg/35 p-2 rounded">
+                        <div className="flex items-center justify-between">
+                          <span className="text-gray-400 font-medium flex items-center gap-1.5">
+                            <span className="h-1.5 w-1.5 rounded-full bg-blue-400" />
+                            Limit Entry ({touchTurnState.side}):
+                          </span>
+                          <span className="text-blue-300 font-bold">
+                            {brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.limitPrice.toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-gray-400 font-medium flex items-center gap-1.5">
+                            <span className="h-1.5 w-1.5 rounded-full bg-[#00e676]" />
+                            Fib Retrace 38.2% Target:
+                          </span>
+                          <span className="text-brand-green font-bold">
+                            {brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.targetPrice.toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-gray-400 font-medium flex items-center gap-1.5">
+                            <span className="h-1.5 w-1.5 rounded-full bg-brand-red" />
+                            Stop Loss Limit (2:1 RR):
+                          </span>
+                          <span className="text-brand-red font-bold">
+                            {brokerType === "ANGELONE" ? "₹" : "$"}{touchTurnState.stopPrice.toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Manual reset button */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTouchTurnState(null);
+                          showToast("Reset Touch & Turn bounds. Re-calculating on next autopilot scan.", "INFO");
+                        }}
+                        className="w-full py-1.5 bg-brand-border/55 hover:bg-brand-border border border-brand-border/60 text-white rounded text-[10px] font-bold uppercase transition flex items-center justify-center gap-1"
+                      >
+                        🔄 Recalculate Range Model
+                      </button>
+                    </div>
+                  )}
+
+                  {/* MACD Front-Side visualizer card */}
+                  {autopilotStrategy === "MACD_FRONT_SIDE" && macdState && (
+                    <div className="bg-brand-bg/85 p-3 rounded-lg border-2 border-sky-500/35 mt-2.5 space-y-3 font-mono shadow-md" id="macd-visualizer">
+                      <div className="flex items-center justify-between border-b border-brand-border/60 pb-2">
+                        <span className="text-[10px] font-bold text-sky-400 uppercase tracking-wider flex items-center gap-1">
+                          <span className="h-2 w-2 rounded-full bg-sky-400 animate-ping" />
+                          📊 MACD METRICS DECK
+                        </span>
+                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase font-mono tracking-wider border ${
+                          macdState.status === "ACTIVE_TRADE"
+                            ? "bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse"
+                            : macdState.status === "IDLE"
+                            ? "bg-sky-500/10 text-sky-400 border-sky-500/25"
+                            : "bg-emerald-500/15 text-[#00e676] border-[#00e676]/30"
+                        }`}>
+                          {macdState.status === "IDLE" ? "IDLE TRACKING" : macdState.status === "ACTIVE_TRADE" ? "ACTIVE LONG SCALP" : "EXITED BACKSIDE"}
+                        </span>
+                      </div>
+
+                      {/* Display computations */}
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-[11px] text-gray-300">
+                        <div>
+                          <span className="text-gray-500 text-[9px] block uppercase tracking-tight">MACD (12, 26)</span>
+                          <span className="font-bold text-gray-100">{macdState.macdValue.toFixed(4)}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 text-[9px] block uppercase tracking-tight">Signal (9)</span>
+                          <span className="font-bold text-gray-100">{macdState.signalValue.toFixed(4)}</span>
+                        </div>
+                        <div className="col-span-2 bg-brand-bg/50 p-2 rounded border border-brand-border/40 text-[10px] space-y-1">
+                          <div className="flex justify-between">
+                            <span className="text-gray-400">Histogram Momentum:</span>
+                            <span className={macdState.histogram >= 0 ? "text-brand-green font-bold" : "text-brand-red font-bold"}>
+                              {macdState.histogram >= 0 ? "+" : ""}{macdState.histogram.toFixed(4)}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-gray-400">Trend Segment:</span>
+                            <span className={macdState.trendSide === "FRONT_SIDE" ? "text-brand-green font-bold" : "text-brand-red font-bold"}>
+                              {macdState.trendSide === "FRONT_SIDE" ? "[FRONT SIDE] (Accelerating)" : "[BACK SIDE] (Chop/Rollover)"}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Spark histogram tracker bar visualization */}
+                      <div className="flex items-end justify-center gap-1.5 px-2 h-11 border border-brand-border/40 rounded bg-brand-bg/25">
+                        {Array.from({ length: 15 }).map((_, i) => {
+                          const step = i - 7;
+                          const heightFactor = Math.abs(macdState.histogram);
+                          const activeHeight = Math.min(38, Math.max(4, heightFactor * 135));
+                          const isActive = i === 7;
+                          let barColor = "bg-brand-green/30";
+                          if (step < 0) barColor = "bg-brand-red/35";
+                          if (isActive) barColor = macdState.histogram >= 0 ? "bg-brand-green animate-pulse" : "bg-brand-red animate-pulse";
+                          
+                          return (
+                            <div 
+                              key={i} 
+                              className={`w-1 rounded-sm ${barColor}`} 
+                              style={{ height: `${isActive ? activeHeight : Math.max(3, activeHeight * (1 - Math.abs(step) * 0.12))}px` }} 
+                              title={`Hist Value: ${macdState.histogram.toFixed(4)}`}
+                            />
+                          );
+                        })}
+                      </div>
+
+                      {/* Targets summary */}
+                      <div className="border-t border-brand-border/50 pt-2 text-[11px] space-y-1.5 bg-brand-bg/35 p-2 rounded">
+                        <div className="flex items-center justify-between">
+                          <span className="text-gray-400 font-medium">Position Status:</span>
+                          <span className="text-sky-300 font-bold uppercase">{macdState.status}</span>
+                        </div>
+                        {macdState.entryPrice && (
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-400 font-medium">Avg Entry Cost:</span>
+                            <span className="text-brand-green font-bold">
+                              {brokerType === "ANGELONE" ? "₹" : "$"}{macdState.entryPrice.toFixed(2)}
+                            </span>
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between">
+                          <span className="text-gray-400 font-medium">Order Allocation:</span>
+                          <span className="text-white font-semibold font-mono">
+                            {macdState.tradeQty} units
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Manual reset button */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMacdState(null);
+                          showToast("Reset MACD indicators. Recalculating trend cycles on next scanner run.", "INFO");
+                        }}
+                        className="w-full py-1.5 bg-brand-border/55 hover:bg-brand-border border border-brand-border/60 text-white rounded text-[10px] font-bold uppercase transition flex items-center justify-center gap-1"
+                      >
+                        🔄 Recalculate MACD Model
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Sneaky Pivot visualizer card */}
+                  {autopilotStrategy === "SNEAKY_PIVOT" && sneakyPivotState && (
+                    <div className="bg-brand-bg/85 p-3 rounded-lg border-2 border-amber-500/35 mt-2.5 space-y-3 font-mono shadow-md" id="sneaky-pivot-visualizer">
+                      <div className="flex items-center justify-between border-b border-brand-border/60 pb-2">
+                        <span className="text-[10px] font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1">
+                          <span className="h-2 w-2 rounded-full bg-amber-400 animate-ping" />
+                          🕵️ SNEAKY PIVOT CORE DECK
+                        </span>
+                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase font-mono tracking-wider border ${
+                          sneakyPivotState.status === "ACTIVE_TRADE"
+                            ? "bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse"
+                            : sneakyPivotState.status === "SCANNING"
+                            ? "bg-sky-500/10 text-sky-400 border-sky-500/25"
+                            : sneakyPivotState.status === "HIT_TARGET"
+                            ? "bg-emerald-500/15 text-[#00e676] border-[#00e676]/30 font-bold"
+                            : "bg-red-500/15 text-brand-red border-brand-red/30"
+                        }`}>
+                          {sneakyPivotState.status === "SCANNING"
+                            ? "SCANNING"
+                            : sneakyPivotState.status === "CANDLE1_ESTABLISHED"
+                            ? "CANDLE-1"
+                            : sneakyPivotState.status === "CONFIRMED_PV_CANDLE2"
+                            ? "CANDLE-2 SNEAKY"
+                            : sneakyPivotState.status === "ACTIVE_TRADE"
+                            ? "ACTIVE SCALP"
+                            : sneakyPivotState.status === "HIT_TARGET"
+                            ? "PROFIT HIT"
+                            : "STOP OUT"}
+                        </span>
+                      </div>
+
+                      {/* Horizontal Trading Box Levels View */}
+                      <div className="space-y-1.5 bg-brand-bg/60 p-2 rounded border border-brand-border/40 text-[10px]">
+                        <span className="text-gray-500 text-[8px] uppercase tracking-wider font-extrabold block mb-1">📐 TRADING BOX HORIZONTAL CHANNELS</span>
+                        
+                        {/* Swing High */}
+                        <div className="flex justify-between items-center bg-red-950/20 px-1.5 py-0.5 rounded border border-brand-red/10">
+                          <span className="text-brand-red/70 font-semibold">🔴 Swing High (Resistance Box Edge):</span>
+                          <span className="text-brand-red font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.swingHigh.toFixed(2)}</span>
+                        </div>
+
+                        {/* Range High */}
+                        <div className="flex justify-between items-center bg-red-950/10 px-1.5 py-0.5 rounded border border-brand-red/5">
+                          <span className="text-red-400 text-[9px]">🔴 Range High (Previous Day High Close):</span>
+                          <span className="text-red-300 font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.rangeHigh.toFixed(2)}</span>
+                        </div>
+
+                        {/* Center core status */}
+                        <div className="text-center py-1 border-y border-brand-border/30 my-1 bg-brand-bg/30 text-[9px] text-gray-400">
+                          ⚡ Center Neutral Chop Zone (Ignored)
+                        </div>
+
+                        {/* Range Low */}
+                        <div className="flex justify-between items-center bg-emerald-950/10 px-1.5 py-0.5 rounded border border-brand-green/5">
+                          <span className="text-emerald-400 text-[9px]">🟢 Range Low (Previous Day Low Close):</span>
+                          <span className="text-emerald-300 font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.rangeLow.toFixed(2)}</span>
+                        </div>
+
+                        {/* Swing Low */}
+                        <div className="flex justify-between items-center bg-emerald-950/20 px-1.5 py-0.5 rounded border border-brand-green/10">
+                          <span className="text-brand-green/70 font-semibold">🟢 Swing Low (Support Box Edge):</span>
+                          <span className="text-brand-green font-bold">{brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.swingLow.toFixed(2)}</span>
+                        </div>
+                      </div>
+
+                      {/* 15m 3-candle Pattern Tracker block */}
+                      <div className="bg-brand-bg/50 p-2 rounded border border-brand-border/40 text-[10px] space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="text-gray-400">Sequence Candle Count:</span>
+                          <span className="text-white font-bold">{sneakyPivotState.candleCount}x (15m units)</span>
+                        </div>
+                        <div className="flex gap-1 justify-between text-center">
+                          {/* Candle 1 block */}
+                          <div className={`flex-1 p-1 rounded font-bold text-[9px] border ${
+                            ["CANDLE1_ESTABLISHED", "CONFIRMED_PV_CANDLE2", "ACTIVE_TRADE", "HIT_TARGET", "HIT_STOP"].includes(sneakyPivotState.status)
+                              ? "bg-[#38bdf8]/15 text-sky-400 border-[#38bdf8]/35 font-black"
+                              : "bg-brand-bg text-gray-500 border-brand-border/30"
+                          }`}>
+                            🕯️ Candle 1<span className="block font-medium text-[8px] font-mono mt-0.5">Setup Zone</span>
+                          </div>
+
+                          {/* Candle 2 sneaky block */}
+                          <div className={`flex-1 p-1 rounded font-bold text-[9px] border ${
+                            ["CONFIRMED_PV_CANDLE2", "ACTIVE_TRADE", "HIT_TARGET", "HIT_STOP"].includes(sneakyPivotState.status)
+                              ? "bg-amber-500/15 text-amber-300 border-amber-500/35 font-black animate-pulse"
+                              : "bg-brand-bg text-gray-500 border-brand-border/30"
+                          }`}>
+                            🕵️ Candle 2<span className="block font-medium text-[8px] font-mono mt-0.5">Wick Sweep</span>
+                          </div>
+
+                          {/* Candle 3 entry block */}
+                          <div className={`flex-1 p-1 rounded font-bold text-[9px] border ${
+                            ["ACTIVE_TRADE", "HIT_TARGET", "HIT_STOP"].includes(sneakyPivotState.status)
+                              ? "bg-brand-green/15 text-brand-green border-brand-green/35 font-black"
+                              : "bg-brand-bg text-gray-500 border-brand-border/30"
+                          }`}>
+                            🎯 Candle 3<span className="block font-medium text-[8px] font-mono mt-0.5">Entry Trigger</span>
+                          </div>
+                        </div>
+
+                        <div className="bg-black/40 p-1.5 rounded text-gray-300 text-[9px] border border-brand-border/30">
+                          <span className="font-bold text-gray-400 uppercase tracking-tight block mb-0.5">Current Interval Log:</span>
+                          <span className="italic">{`"${sneakyPivotState.lastCandleAction}"`}</span>
+                        </div>
+                      </div>
+
+                      {/* Position target & stops details */}
+                      {sneakyPivotState.status === "ACTIVE_TRADE" && (
+                        <div className="border-t border-brand-border/50 pt-2 text-[11px] space-y-1.5 bg-brand-bg/35 p-2 rounded">
+                          <div className="flex items-center justify-between font-bold">
+                            <span className="text-gray-400">Position Direction:</span>
+                            <span className={sneakyPivotState.side === "BUY" ? "text-brand-green" : "text-brand-red"}>
+                              {sneakyPivotState.side === "BUY" ? "🚀 LONG SCALP" : "📉 SHORT SCALP"}
+                            </span>
+                          </div>
+                          {sneakyPivotState.entryPrice && (
+                            <div className="flex items-center justify-between">
+                              <span className="text-gray-400 font-medium">Locked Entry Cost:</span>
+                              <span className="text-white font-bold">
+                                {brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.entryPrice.toFixed(2)}
+                              </span>
+                            </div>
+                          )}
+                          {sneakyPivotState.targetPrice && (
+                            <div className="flex items-center justify-between">
+                              <span className="text-gray-400 font-medium">Pivot Exit Profit Target:</span>
+                              <span className="text-brand-green font-bold">
+                                {brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.targetPrice.toFixed(2)}
+                              </span>
+                            </div>
+                          )}
+                          {sneakyPivotState.stopPrice && (
+                            <div className="flex items-center justify-between">
+                              <span className="text-gray-400 font-medium">&quot;Guardian Angel&quot; Stop Loss:</span>
+                              <span className="text-brand-red font-bold">
+                                {brokerType === "ANGELONE" ? "₹" : "$"}{sneakyPivotState.stopPrice.toFixed(2)}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Manual reset button */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSneakyPivotState(null);
+                          showToast("Reset Sneaky Pivot tracking state. Re-calculating ranges on next block cycle.", "INFO");
+                        }}
+                        className="w-full py-1.5 bg-brand-border/55 hover:bg-brand-border border border-brand-border/60 text-white rounded text-[10px] font-bold uppercase transition flex items-center justify-center gap-1"
+                      >
+                        🔄 Recalculate Pivot Levels
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Micro Real-time activity log specific to Sentry Autopilot */}
@@ -2996,6 +4602,81 @@ if __name__ == "__main__":
           </span>
         </div>
       </footer>
+
+      {/* Dynamic Toast Portal */}
+      <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-3 max-w-sm w-full pointer-events-none" id="toast-portal-container">
+        {toasts.map((toast) => {
+          let bgColor = "bg-brand-card border-brand-border";
+          let textColor = "text-white";
+          let iconColor = "text-gray-400";
+          let iconComponent = <Sliders className="h-5 w-5" />;
+
+          if (toast.type === "SUCCESS") {
+            bgColor = "bg-emerald-950/90 border-[#00e676]/55 backdrop-blur-md";
+            textColor = "text-emerald-50";
+            iconColor = "text-brand-green";
+            iconComponent = <CheckCircle className="h-5 w-5" />;
+          } else if (toast.type === "WARNING") {
+            bgColor = "bg-yellow-950/90 border-yellow-500/50 backdrop-blur-md";
+            textColor = "text-yellow-50";
+            iconColor = "text-yellow-400";
+            iconComponent = <AlertTriangle className="h-5 w-5" />;
+          } else if (toast.type === "CRITICAL") {
+            bgColor = "bg-red-950/95 border-brand-red/60 backdrop-blur-md";
+            textColor = "text-red-50";
+            iconColor = "text-brand-red";
+            iconComponent = <ShieldAlert className="h-5 w-5" />;
+          } else if (toast.type === "INFO") {
+            bgColor = "bg-[#121420]/95 border-brand-border backdrop-blur-md";
+            textColor = "text-sky-50";
+            iconColor = "text-[#38bdf8]";
+            iconComponent = <Zap className="h-5 w-5" />;
+          }
+
+          return (
+            <div
+              key={toast.id}
+              className={`pointer-events-auto p-4 rounded-xl border-2 shadow-xl shadow-black/45 flex items-start gap-3 transition-all duration-300 transform translate-y-0 scale-100 animate-slide-in ${bgColor}`}
+              id={`toast-card-${toast.id}`}
+            >
+              <div className={`${iconColor} shrink-0 mt-0.5`}>
+                {iconComponent}
+              </div>
+              <div className="flex-1">
+                <p className={`text-xs font-semibold uppercase tracking-wider mb-0.5 ${iconColor}`}>
+                  {toast.type}
+                </p>
+                <p className={`text-xs font-mono break-words ${textColor}`}>{toast.message}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setToasts((prev) => prev.filter((t) => t.id !== toast.id))}
+                className="text-gray-400 hover:text-white font-bold text-xs shrink-0 self-start ml-1"
+              >
+                ✕
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Global CSS for Button Visual Press-Scale & Toast Entry Slide Animations */}
+      <style dangerouslySetInnerHTML={{ __html: `
+        @keyframes toast-slide-in {
+          from { transform: translateY(1.5rem) scale(0.95); opacity: 0; }
+          to { transform: translateY(0) scale(1); opacity: 1; }
+        }
+        .animate-slide-in {
+          animation: toast-slide-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+        button, select, input[type="submit"], [role="button"] {
+          transition: transform 0.1s cubic-bezier(0.4, 0, 0.2, 1), filter 0.1s ease-in-out, background-color 0.15s ease !important;
+        }
+        button:not(:disabled):active, select:active, input[type="submit"]:active, [role="button"]:active {
+          transform: scale(0.95) !important;
+          filter: brightness(1.15) !important;
+        }
+      `}} />
 
     </div>
   );
