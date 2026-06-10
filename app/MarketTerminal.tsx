@@ -179,6 +179,34 @@ export default function MarketTerminal() {
   // Toast for short-term action summaries
   const [toast, setToast] = useState<{ message: string; level?: "info" | "success" | "warn" | "error" } | null>(null);
 
+  // In-app error overlay for capturing browser console/runtime errors
+  const [overlayErrors, setOverlayErrors] = useState<Array<{ id: string; message: string; stack?: string }>>([]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const onError = (event: any) => {
+      try {
+        const id = `err-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+        const message = event?.message || (event?.reason && event.reason.message) || String(event);
+        const stack = event?.error?.stack || (event?.reason && event.reason.stack) || undefined;
+        setOverlayErrors((s) => [{ id, message, stack }, ...s]);
+        // keep visible and also log
+        // eslint-disable-next-line no-console
+        console.error("Captured overlay error:", message, stack || event);
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    window.addEventListener("error", onError as EventListener);
+    window.addEventListener("unhandledrejection", onError as EventListener);
+
+    return () => {
+      window.removeEventListener("error", onError as EventListener);
+      window.removeEventListener("unhandledrejection", onError as EventListener);
+    };
+  }, []);
+
   // Immediate deleverage command callable from UI
   const performDeleverage = useCallback(async () => {
     const curRef = stateRef.current;
@@ -594,7 +622,7 @@ export default function MarketTerminal() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [useAlpacaLive, brokerType, angelApiKey, angelClientCode, angelMpin, angelTotpSeed, apiKey, apiSecret, isPaper]);
+  }, [useAlpacaLive, brokerType, angelApiKey, angelClientCode, angelMpin, angelTotpSeed, apiKey, apiSecret, isPaper, addLog]);
 
   // Stable state ref to bypass interval recreate throttling
   const stateRef = React.useRef<any>({
@@ -691,7 +719,7 @@ export default function MarketTerminal() {
     autopilotBlacklist
   ]);
 
-  const addAutopilotLog = (msg: string, type: "info" | "success" | "warn" | "trade") => {
+  const addAutopilotLog = useCallback((msg: string, type: "info" | "success" | "warn" | "trade") => {
     const newLog = {
       id: `ap-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
       time: new Date().toLocaleTimeString(),
@@ -699,7 +727,7 @@ export default function MarketTerminal() {
       type
     };
     setAutopilotLogs((prev) => [newLog, ...prev].slice(0, 50));
-  };
+  }, []);
 
   const executeAutopilotOrder = useCallback(async (symbolClean: string, side: "BUY" | "SELL", qtyNum: number) => {
     const curRef = stateRef.current;
@@ -1129,7 +1157,7 @@ export default function MarketTerminal() {
         ...prev,
       ]);
     }
-  }, []);
+  }, [addAutopilotLog, addLog]);
 
   const executeAutopilotScan = useCallback(async () => {
     const curRef = stateRef.current;
@@ -1975,7 +2003,7 @@ export default function MarketTerminal() {
     } finally {
       setIsAutopilotRunning(false);
     }
-  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState]);
+  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, addAutopilotLog]);
 
   // Autopilot loop trigger
   useEffect(() => {
@@ -1993,7 +2021,7 @@ export default function MarketTerminal() {
     return () => {
       if (intervalId) clearInterval(intervalId);
     };
-  }, [isAutopilotActive, autopilotInterval, executeAutopilotScan]);
+  }, [isAutopilotActive, autopilotInterval, executeAutopilotScan, addAutopilotLog]);
 
   // Natural Simulator Market Drift Tick Engine
   useEffect(() => {
@@ -3427,6 +3455,30 @@ if __name__ == "__main__":
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 bg-brand-bg md:p-8" id="root-container">
+      {/* In-app Error Overlay */}
+      {overlayErrors.length > 0 && (
+        <div className="fixed top-4 right-4 z-60 w-96 max-h-[60vh] overflow-auto bg-red-900/90 text-white p-3 rounded shadow-lg border border-red-700">
+          <div className="flex justify-between items-center mb-2">
+            <strong>Runtime Errors ({overlayErrors.length})</strong>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setOverlayErrors([])}
+                className="text-xs px-2 py-1 bg-red-700/60 rounded hover:bg-red-600"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+          <div className="space-y-2">
+            {overlayErrors.map((e) => (
+              <div key={e.id} className="text-xs bg-red-800/50 p-2 rounded">
+                <div className="font-medium">{e.message}</div>
+                {e.stack && <pre className="mt-1 text-xs whitespace-pre-wrap text-red-200">{e.stack}</pre>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {/* Confirmation Modal */}
       {confirmModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
