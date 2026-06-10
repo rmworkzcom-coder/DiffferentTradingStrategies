@@ -2,10 +2,32 @@ import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
+function isCryptoSymbol(sym: string): boolean {
+  return /(BTCUSD|ETHUSD|LTCUSD|BCHUSD|SOLUSD|DOGEUSD|AVAXUSD)$/i.test(sym);
+}
+
+function getEtDate(now = new Date()): Date {
+  return new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+}
+
+function isRegularUsSession(etNow: Date): boolean {
+  const day = etNow.getDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return false;
+  const mins = etNow.getHours() * 60 + etNow.getMinutes();
+  return mins >= 570 && mins < 960; // 9:30 - 16:00 ET
+}
+
+function isExtendedUsSession(etNow: Date): boolean {
+  const day = etNow.getDay();
+  if (day === 0 || day === 6) return false;
+  const mins = etNow.getHours() * 60 + etNow.getMinutes();
+  return (mins >= 240 && mins < 570) || (mins >= 960 && mins < 1200); // 4:00-9:30, 16:00-20:00
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { apiKey, apiSecret, isPaper, symbol, qty, side, notional } = body;
+    const { apiKey, apiSecret, isPaper, symbol, qty, side, notional, estimatedPrice } = body;
 
     if (!apiKey || !apiSecret) {
       return NextResponse.json(
@@ -35,8 +57,9 @@ export async function POST(req: Request) {
       "User-Agent": "Alpaca-Margin-Terminal/1.0",
     };
 
+    const symbolUpper = symbol.toUpperCase();
     const payload: any = {
-      symbol: symbol.toUpperCase(),
+      symbol: symbolUpper,
       side: side,
       type: "market",
       time_in_force: "day",
@@ -46,6 +69,30 @@ export async function POST(req: Request) {
       payload.notional = notional.toString();
     } else {
       payload.qty = qty.toString();
+    }
+
+    const etNow = getEtDate();
+    const regularHours = isRegularUsSession(etNow);
+    const extendedHours = isExtendedUsSession(etNow);
+    const canUseExtendedEquityPath =
+      !isCryptoSymbol(symbolUpper) &&
+      !hasNotional &&
+      hasQty &&
+      !regularHours &&
+      extendedHours &&
+      Number.isFinite(parseFloat(String(estimatedPrice))) &&
+      parseFloat(String(estimatedPrice)) > 0;
+
+    if (canUseExtendedEquityPath) {
+      const px = parseFloat(String(estimatedPrice));
+      const adjustedLimit = side === "buy"
+        ? px * 1.02
+        : px * 0.98;
+
+      payload.type = "limit";
+      payload.limit_price = adjustedLimit.toFixed(2);
+      payload.time_in_force = "day";
+      payload.extended_hours = true;
     }
 
     const orderRes = await fetch(`${baseUrl}/v2/orders`, {

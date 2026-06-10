@@ -1109,6 +1109,7 @@ export default function MarketTerminal() {
               symbol: symbolClean,
               qty: finalQty,
               side: side.toLowerCase(),
+              estimatedPrice: estPrice,
             }),
           });
         }
@@ -1574,30 +1575,72 @@ export default function MarketTerminal() {
 
         const existingScalperPos = currentActivePositions.find((p) => p.symbol === targetSymbol);
         const hasPendingSeedBuy = autopilotPendingBuySymbolsRef.current.has(targetSymbol);
+
+        const isLiveMode = !!curRef.useAlpacaLive;
+        const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
+        const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+        const liveBudget = isLiveMode
+          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.05)
+          : 0;
+        const liveMinQty = targetSymbol === "BTCUSD"
+          ? Math.max(0.0001, Number(curRef.liveMinCryptoOrderQty) || 0.0001)
+          : Math.max(0.01, Number(curRef.liveMinOrderQty) || 0.01);
+        const budgetQtyRaw = currentSpotPrice > 0 ? liveBudget / currentSpotPrice : 0;
+        const liveQtyByBudget = targetSymbol === "BTCUSD"
+          ? parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(4))
+          : parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(2));
+
         if (hasPendingSeedBuy) {
           addAutopilotLog(`Scalper bootstrap paused for ${targetSymbol}: previous BUY is still pending broker fill confirmation.`, "info");
           return;
         }
         if (!existingScalperPos || existingScalperPos.qty <= 0) {
-          const seedQty = targetSymbol === "BTCUSD" ? 0.002 : 1;
+          const seedQty = isLiveMode
+            ? liveQtyByBudget
+            : (targetSymbol === "BTCUSD" ? 0.002 : 1);
           addAutopilotLog(`Scalper bootstrap: no active ${targetSymbol} position found. Attempting seed BUY ${seedQty}.`, "trade");
           const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", seedQty);
           logScanOrderOutcome("SCALPER", orderOutcome);
           return;
         }
 
+        // Deterministic exits: if a live position breaches global TP/SL bounds, exit first.
+        const existingQty = existingScalperPos.qty;
+        const existingEntry = Number(existingScalperPos.avg_entry_price || 0);
+        if (existingQty > 0 && existingEntry > 0) {
+          const pnlPct = ((currentSpotPrice - existingEntry) / existingEntry) * 100;
+          const tpPct = Number(curRef.globalTakeProfitPercent || 15);
+          const slPct = Number(curRef.globalStopLossPercent || 5);
+
+          if (pnlPct >= tpPct || pnlPct <= -slPct) {
+            const sellQty = targetSymbol === "BTCUSD"
+              ? Math.min(existingQty, 0.02)
+              : Math.min(existingQty, 5);
+            const triggerLabel = pnlPct >= tpPct ? "TP" : "SL";
+            addAutopilotLog(`Scalper ${triggerLabel} exit: ${targetSymbol} at ${pnlPct.toFixed(2)}% (entry ${existingEntry.toFixed(2)} -> now ${currentSpotPrice.toFixed(2)}). Attempting SELL ${sellQty}.`, "trade");
+            const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
+            logScanOrderOutcome("SCALPER", orderOutcome);
+            return;
+          }
+        }
+
         const randSeed = Math.random();
-        if (randSeed > 0.55) {
-          const buyQty = targetSymbol === "BTCUSD" ? 0.02 : 5;
+        const buyThreshold = isLiveMode ? 0.55 : 0.60;
+        const sellThreshold = isLiveMode ? 0.45 : 0.40;
+
+        if (randSeed > buyThreshold) {
+          const buyQty = isLiveMode
+            ? liveQtyByBudget
+            : (targetSymbol === "BTCUSD" ? 0.02 : 5);
           addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) is dipping below support. Attempting BUY order.`, "trade");
           const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", buyQty);
           logScanOrderOutcome("SCALPER", orderOutcome);
-        } else if (randSeed < 0.25) {
+        } else if (randSeed < sellThreshold) {
           const exists = currentActivePositions.find((p) => p.symbol === targetSymbol);
           if (exists && exists.qty > 0) {
             const sellQty = targetSymbol === "BTCUSD"
-              ? Math.min(exists.qty, 0.02)
-              : Math.min(exists.qty, 5);
+              ? Math.min(exists.qty, isLiveMode ? Math.max(liveMinQty, 0.002) : 0.02)
+              : Math.min(exists.qty, isLiveMode ? Math.max(liveMinQty, 1) : 5);
             addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) hit local resistance spike. Attempting SELL order.`, "trade");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
             logScanOrderOutcome("SCALPER", orderOutcome);
@@ -3038,6 +3081,7 @@ export default function MarketTerminal() {
           } else {
             payload.qty = parseFloat(qtyNum.toFixed(6));
           }
+          payload.estimatedPrice = estPrice;
 
           const response = await fetch("/api/alpaca/trade", {
             method: "POST",
