@@ -605,6 +605,23 @@ export default function MarketTerminal() {
     addAutopilotLog(`Liquidation cooldown armed for ${symbolClean}: buy re-entry paused for ${Math.floor(LIQUIDATION_COOLDOWN_MS / 1000)}s (${source}).`, "info");
   }, [LIQUIDATION_COOLDOWN_MS, addAutopilotLog]);
 
+  const isLossMakingPosition = useCallback((pos: any): boolean => {
+    if (!pos) return false;
+    const pnl = Number(pos.unrealized_pl);
+    if (Number.isFinite(pnl)) {
+      return pnl < 0;
+    }
+    const qty = Number(pos.qty || 0);
+    const avg = Number(pos.avg_entry_price || 0);
+    const cur = Number(pos.current_price || 0);
+    if (!Number.isFinite(qty) || !Number.isFinite(avg) || !Number.isFinite(cur) || avg <= 0 || cur <= 0) {
+      return false;
+    }
+    if (qty > 0) return cur < avg;
+    if (qty < 0) return cur > avg;
+    return false;
+  }, []);
+
   // Refresh data proxy
   const handleRefreshData = useCallback(async () => {
     if (!useAlpacaLive) return;
@@ -810,6 +827,7 @@ export default function MarketTerminal() {
       (existingPositionBeforeOrder.qty > 0 && side === "SELL" && qtyNum >= existingPositionBeforeOrder.qty) ||
       (existingPositionBeforeOrder.qty < 0 && side === "BUY" && qtyNum >= Math.abs(existingPositionBeforeOrder.qty))
     );
+    const isLossCloseAttempt = isFullCloseAttempt && isLossMakingPosition(existingPositionBeforeOrder);
 
     // Automated Blacklist Intercept Check (e.g. to avoid trading low-winrate or banned symbols like TSLA in Autopilot entirely)
     if (curRef.autopilotBlacklist?.includes(symbolClean)) {
@@ -1182,7 +1200,7 @@ export default function MarketTerminal() {
           addLog(symbolClean, `${side}_ACCEPTED`, `Live automated order accepted by broker (status: ${brokerStatus}, path: ${routeDescriptor}).`, "INFO");
         }
 
-        if (isFullCloseAttempt && (isFilledStatus || brokerStatus === "ACCEPTED" || brokerStatus === "NEW" || brokerStatus === "PARTIALLY_FILLED")) {
+        if (isLossCloseAttempt && (isFilledStatus || brokerStatus === "ACCEPTED" || brokerStatus === "NEW" || brokerStatus === "PARTIALLY_FILLED")) {
           armLiquidationCooldown(symbolClean, "auto-close order");
         }
 
@@ -1446,7 +1464,7 @@ export default function MarketTerminal() {
         addLog(symbolClean, "AUTO_SELL_SIM", `Sold simulated ${qtyNum} shares of ${symbolClean} with net credit (Fees & taxes: ${currencySymbol}${orderFees.toFixed(2)})`, "SUCCESS");
       }
 
-      if (isFullCloseAttempt) {
+      if (isLossCloseAttempt) {
         armLiquidationCooldown(symbolClean, "simulated close order");
       }
 
@@ -1473,7 +1491,7 @@ export default function MarketTerminal() {
         message: "Simulated order filled."
       };
     }
-  }, [addAutopilotLog, addLog, armLiquidationCooldown]);
+  }, [addAutopilotLog, addLog, armLiquidationCooldown, isLossMakingPosition]);
 
   const logScanOrderOutcome = useCallback((source: string, outcome: AutopilotOrderResult) => {
     setLastAutopilotOrderOutcome(outcome);
@@ -3530,7 +3548,9 @@ export default function MarketTerminal() {
           }
           
           addLog(symbolClean, "LIQUIDATED", `Position fully liquidated! Sold ${existingPos.qty} shares.`, "SUCCESS");
-          armLiquidationCooldown(symbolClean, "manual position liquidation");
+          if (isLossMakingPosition(existingPos)) {
+            armLiquidationCooldown(symbolClean, "manual position liquidation");
+          }
           
           // Append to manual order records
           const newOrderObj: Order = {
@@ -3572,9 +3592,13 @@ export default function MarketTerminal() {
           if (!response.ok || rawData?.error) {
             throw new Error(rawData?.error || "Liquidation rejected by Alpaca.");
           }
+
+          const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
           
           addLog(symbolClean, "LIQUIDATED", `Direct position liquidation successful! Broker order queued.`, "SUCCESS");
-          armLiquidationCooldown(symbolClean, "manual position liquidation");
+          if (isLossMakingPosition(existingPos)) {
+            armLiquidationCooldown(symbolClean, "manual position liquidation");
+          }
           
           setTimeout(() => {
             handleRefreshData();
@@ -3620,7 +3644,9 @@ export default function MarketTerminal() {
           `Simulator closed ${symbolClean} position of ${pos.qty} shares for net of $${Math.abs(netProceeds).toFixed(2)} (Fees: $${orderFees.toFixed(2)}).`,
           "SUCCESS"
         );
-        armLiquidationCooldown(symbolClean, "manual position liquidation");
+        if (isLossMakingPosition(pos)) {
+          armLiquidationCooldown(symbolClean, "manual position liquidation");
+        }
       }
     } catch (err: any) {
       console.error(err);
@@ -3703,7 +3729,9 @@ export default function MarketTerminal() {
                 if (!data.error) {
                   successCount++;
                   addLog(pos.symbol, "LIQUIDATED", `Asset successfully sold ${pos.qty} shares.`, "SUCCESS");
-                  armLiquidationCooldown(pos.symbol, "portfolio liquidation");
+                  if (isLossMakingPosition(pos)) {
+                    armLiquidationCooldown(pos.symbol, "portfolio liquidation");
+                  }
                 }
               }
             } catch (posErr) {
@@ -3741,7 +3769,7 @@ export default function MarketTerminal() {
           
           addLog("PORTFOLIO", "LIQUIDATION_COMPLETE", "Alpaca direct portfolio liquidation broadcasted. All broker assets closed out.", "SUCCESS");
           for (const pos of alpacaPositions) {
-            if (pos.qty > 0) {
+            if (Math.abs(pos.qty) > 0 && isLossMakingPosition(pos)) {
               armLiquidationCooldown(pos.symbol, "portfolio liquidation");
             }
           }
@@ -3796,7 +3824,7 @@ export default function MarketTerminal() {
           "SUCCESS"
         );
         for (const pos of mockPositions) {
-          if (Math.abs(pos.qty) > 0) {
+          if (Math.abs(pos.qty) > 0 && isLossMakingPosition(pos)) {
             armLiquidationCooldown(pos.symbol, "portfolio liquidation");
           }
         }
