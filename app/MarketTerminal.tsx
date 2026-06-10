@@ -839,17 +839,46 @@ export default function MarketTerminal() {
       const newExposurePct = ((currentPosVal + intendedValue) / totalPortfolio) * 100;
 
       if (side === "BUY" && (newExposurePct > (curRef.maxExposurePercentPerSymbol || 100))) {
-        addAutopilotLog(`🚫 Blocked BUY ${symbolClean}: post-order exposure ${newExposurePct.toFixed(2)}% would exceed ${curRef.maxExposurePercentPerSymbol}% limit.`, "warn");
-        addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: exposure cap exceeded (${newExposurePct.toFixed(2)}%).`, "WARNING");
-        return {
-          status: "BLOCKED",
-          code: "BLOCKED_EXPOSURE_CAP",
-          symbol: symbolClean,
-          side,
-          requestedQty: qtyNum,
-          executedQty: 0,
-          message: `Post-order exposure ${newExposurePct.toFixed(2)}% exceeds cap ${curRef.maxExposurePercentPerSymbol}%.`
-        };
+        const capPct = curRef.maxExposurePercentPerSymbol || 100;
+        const maxAdditionalValue = (totalPortfolio * (capPct / 100)) - currentPosVal;
+        const minExecutableQty = symbolClean === "BTCUSD" ? 0.0005 : 0.05;
+
+        if (maxAdditionalValue <= 0) {
+          addAutopilotLog(`🚫 Blocked BUY ${symbolClean}: current exposure already at or above ${capPct}% cap.`, "warn");
+          addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: no remaining exposure budget under cap (${capPct}%).`, "WARNING");
+          return {
+            status: "BLOCKED",
+            code: "BLOCKED_EXPOSURE_CAP",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: 0,
+            message: `No remaining exposure budget under ${capPct}% cap.`
+          };
+        }
+
+        const rawAffordableQty = maxAdditionalValue / Math.max(guessPrice, 0.000001);
+        const resizedQty = symbolClean === "BTCUSD"
+          ? parseFloat(rawAffordableQty.toFixed(4))
+          : parseFloat(rawAffordableQty.toFixed(2));
+
+        if (!Number.isFinite(resizedQty) || resizedQty < minExecutableQty || resizedQty >= qtyNum) {
+          addAutopilotLog(`🚫 Blocked BUY ${symbolClean}: post-order exposure ${newExposurePct.toFixed(2)}% would exceed ${capPct}% limit.`, "warn");
+          addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: exposure cap exceeded (${newExposurePct.toFixed(2)}%).`, "WARNING");
+          return {
+            status: "BLOCKED",
+            code: "BLOCKED_EXPOSURE_CAP",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: 0,
+            message: `Post-order exposure ${newExposurePct.toFixed(2)}% exceeds cap ${capPct}%.`
+          };
+        }
+
+        addAutopilotLog(`📉 Exposure cap resize: ${symbolClean} BUY reduced from ${qtyNum} to ${resizedQty} to fit ${capPct}% cap.`, "info");
+        addLog(symbolClean, "AUTO_TRADE_RESIZED", `Auto-resized BUY ${symbolClean} from ${qtyNum} to ${resizedQty} due to exposure cap ${capPct}%.`, "INFO");
+        return await executeAutopilotOrder(symbolClean, side, resizedQty);
       }
     } catch (e) {
       // if anything fails, do not block trades silently; just log
