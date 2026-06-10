@@ -415,6 +415,7 @@ export default function MarketTerminal() {
 
   const [autopilotInterval, setAutopilotInterval] = useState(5); // in seconds
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
+  const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
   const [activeVisualizerSymbol] = useState<string>("");
 
   // Global automated exit thresholds (percent)
@@ -452,10 +453,12 @@ export default function MarketTerminal() {
       const sl = typeof window !== "undefined" && localStorage.getItem("sentry:globalSL");
       const minLiveQty = typeof window !== "undefined" && localStorage.getItem("sentry:liveMinQty");
       const minLiveCryptoQty = typeof window !== "undefined" && localStorage.getItem("sentry:liveMinCryptoQty");
+      const broadScan = typeof window !== "undefined" && localStorage.getItem("sentry:scanBroadUniverse");
       if (tp) setGlobalTakeProfitPercent(Math.max(0, parseFloat(tp)));
       if (sl) setGlobalStopLossPercent(Math.max(0, parseFloat(sl)));
       if (minLiveQty) setLiveMinOrderQty(Math.max(0.0001, parseFloat(minLiveQty)));
       if (minLiveCryptoQty) setLiveMinCryptoOrderQty(Math.max(0.000001, parseFloat(minLiveCryptoQty)));
+      if (broadScan) setAutopilotScanBroadUniverse(broadScan === "true");
     } catch (e) {
       // ignore
     }
@@ -473,9 +476,10 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:liveMinQty", String(liveMinOrderQty));
         localStorage.setItem("sentry:liveMinCryptoQty", String(liveMinCryptoOrderQty));
         localStorage.setItem("sentry:aggressiveDeleverage", JSON.stringify(aggressiveDeleverage));
+        localStorage.setItem("sentry:scanBroadUniverse", String(autopilotScanBroadUniverse));
       }
     } catch (e) {}
-  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage]);
+  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse]);
 
   useEffect(() => {
     try {
@@ -586,6 +590,8 @@ export default function MarketTerminal() {
     }
   ]);
   const [lastAutopilotOrderOutcome, setLastAutopilotOrderOutcome] = useState<AutopilotOrderResult | null>(null);
+  const [autopilotLastScanAtMs, setAutopilotLastScanAtMs] = useState<number | null>(null);
+  const [autopilotNextScanInSec, setAutopilotNextScanInSec] = useState<number | null>(null);
   const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
   const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("manual");
   const [isTickStreamActive, setIsTickStreamActive] = useState(true);
@@ -772,6 +778,7 @@ export default function MarketTerminal() {
     angelTotpSeed,
     autopilotStrategy,
     autopilotTargetTicker,
+    autopilotScanBroadUniverse,
     warnThreshold,
     isAutopilotRunning,
     alpacaAccount,
@@ -805,6 +812,7 @@ export default function MarketTerminal() {
       angelTotpSeed,
       autopilotStrategy,
       autopilotTargetTicker,
+      autopilotScanBroadUniverse,
       warnThreshold,
       isAutopilotRunning,
       alpacaAccount,
@@ -838,6 +846,7 @@ export default function MarketTerminal() {
     angelTotpSeed,
     autopilotStrategy,
     autopilotTargetTicker,
+    autopilotScanBroadUniverse,
     warnThreshold,
     isAutopilotRunning,
     alpacaAccount,
@@ -1649,6 +1658,8 @@ export default function MarketTerminal() {
     const curRef = stateRef.current;
     if (curRef.isAutopilotRunning) return;
     setIsAutopilotRunning(true);
+    setAutopilotLastScanAtMs(Date.now());
+    setAutopilotNextScanInSec(Math.max(0, autopilotInterval));
     addAutopilotLog(`Executing Autopilot scan (${curRef.useAlpacaLive ? "Live-Alpaca Client" : "Simulator Model"})...`, "info");
 
     try {
@@ -1669,7 +1680,10 @@ export default function MarketTerminal() {
       const nowTs = Date.now();
       const isLossGuardTemporarilyBlocked = (sym: string) => (autopilotLossGuardBlockedUntilRef.current[sym] || 0) > nowTs;
       const blacklistSet = new Set((curRef.autopilotBlacklist || []).map((s: string) => s.toUpperCase()));
-      const baseTargets = parsedTargets.length > 0 ? parsedTargets : ["AAPL"];
+      const broadUniverseTargets = autopilotScanBroadUniverse
+        ? quickTickers.map((s) => s.toUpperCase())
+        : [];
+      const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
       let scanTargets = baseTargets.filter((sym: string) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
 
       // If user supplied only one target and it's temporarily blocked by Loss Guard,
@@ -2582,7 +2596,27 @@ export default function MarketTerminal() {
     } finally {
       setIsAutopilotRunning(false);
     }
-  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, addAutopilotLog, logScanOrderOutcome, quickTickers]);
+  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, addAutopilotLog, logScanOrderOutcome, quickTickers, autopilotInterval, autopilotScanBroadUniverse]);
+
+  useEffect(() => {
+    if (!isAutopilotActive) {
+      setAutopilotNextScanInSec(null);
+      return;
+    }
+
+    const computeRemaining = () => {
+      if (!autopilotLastScanAtMs) {
+        setAutopilotNextScanInSec(Math.max(0, autopilotInterval));
+        return;
+      }
+      const elapsedSec = Math.floor((Date.now() - autopilotLastScanAtMs) / 1000);
+      setAutopilotNextScanInSec(Math.max(0, autopilotInterval - elapsedSec));
+    };
+
+    computeRemaining();
+    const timer = setInterval(computeRemaining, 1000);
+    return () => clearInterval(timer);
+  }, [isAutopilotActive, autopilotInterval, autopilotLastScanAtMs]);
 
   useEffect(() => {
     if (!useAlpacaLive) return;
@@ -5350,6 +5384,19 @@ if __name__ == "__main__":
                     </div>
                   </div>
 
+                  <div className="flex items-center gap-2 pt-1 border-t border-brand-border/40" id="broad-scan-toggle-row">
+                    <input
+                      type="checkbox"
+                      id="check-broad-scan-active"
+                      checked={autopilotScanBroadUniverse}
+                      onChange={(e) => setAutopilotScanBroadUniverse(e.target.checked)}
+                      className="rounded bg-brand-bg border-brand-border text-brand-green focus:ring-0 cursor-pointer h-4 w-4"
+                    />
+                    <label htmlFor="check-broad-scan-active" className="text-[10px] text-gray-400 font-mono font-semibold cursor-pointer">
+                      Broad Universe Scan: rotate through quick ticker basket in addition to target symbol(s)
+                    </label>
+                  </div>
+
                   {/* Global TP/SL controls */}
                   <div className="grid grid-cols-2 gap-3 pt-2" id="global-tp-sl-row">
                     <div>
@@ -5859,6 +5906,16 @@ if __name__ == "__main__":
 
                       {/* Horizontal Trading Box Levels View */}
                       <div className="space-y-1.5 bg-brand-bg/60 p-2 rounded border border-brand-border/40 text-[10px]">
+                        <div className="grid grid-cols-2 gap-2 text-[9px] border-b border-brand-border/30 pb-1.5 mb-1.5">
+                          <div className="flex justify-between gap-2">
+                            <span className="text-gray-400">Last Scan:</span>
+                            <span className="text-gray-200 font-semibold">{autopilotLastScanAtMs ? new Date(autopilotLastScanAtMs).toLocaleTimeString() : "--"}</span>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <span className="text-gray-400">Next Scan In:</span>
+                            <span className="text-sky-300 font-semibold">{autopilotNextScanInSec !== null ? `${autopilotNextScanInSec}s` : "--"}</span>
+                          </div>
+                        </div>
                         <span className="text-gray-500 text-[8px] uppercase tracking-wider font-extrabold block mb-1">📐 TRADING BOX HORIZONTAL CHANNELS</span>
                         
                         {/* Swing High */}
