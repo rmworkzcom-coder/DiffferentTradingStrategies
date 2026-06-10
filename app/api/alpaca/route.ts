@@ -60,6 +60,7 @@ export async function POST(req: Request) {
         initial_margin: accountData.initial_margin,
         long_market_value: accountData.long_market_value,
         short_market_value: accountData.short_market_value,
+        shorting_enabled: accountData.shorting_enabled,
       },
       positions: positionsData.map((pos: any) => ({
         symbol: pos.symbol,

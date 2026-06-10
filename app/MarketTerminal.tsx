@@ -413,7 +413,7 @@ export default function MarketTerminal() {
     lastCandleAction: string;
   }>>({});
 
-  const [autopilotInterval, setAutopilotInterval] = useState(10); // in seconds
+  const [autopilotInterval, setAutopilotInterval] = useState(5); // in seconds
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
   const [activeVisualizerSymbol] = useState<string>("");
 
@@ -595,6 +595,7 @@ export default function MarketTerminal() {
   const sentryHealthStateRef = useRef<"healthy" | "warning" | null>(null);
   const autopilotPendingBuySymbolsRef = useRef<Set<string>>(new Set());
   const autopilotPendingBuyMetaRef = useRef<Record<string, { baseQty: number; submittedQty: number; submittedAt: number }>>({});
+  const autopilotLossGuardBlockedUntilRef = useRef<Record<string, number>>({});
   const autopilotBuyCooldownUntilRef = useRef<Record<string, number>>({});
   const autopilotTargetSymbolIndexRef = useRef(0);
   const LIQUIDATION_COOLDOWN_MS = 30 * 60 * 1000;
@@ -922,6 +923,7 @@ export default function MarketTerminal() {
             ? parseFloat(matched.unrealized_pl) 
             : (parseFloat(matched.current_price || 0) - parseFloat(matched.avg_entry_price || 0)) * qty;
           if (pl < 0) {
+            autopilotLossGuardBlockedUntilRef.current[symbolClean] = Date.now() + 5 * 60 * 1000;
             addAutopilotLog(`🛡️ Loss Guard Blocked BUY of ${symbolClean}: existing position is holding a paper loss of $${pl.toFixed(2)}. Capital protected from average-down traps!`, "warn");
             addLog(symbolClean, "AUTO_BUY_BLOCKED", `Sentry Loss Guard withheld automated buy order of ${symbolClean} to avoid averaging down on a losing holding.`, "WARNING");
             return {
@@ -1248,8 +1250,8 @@ export default function MarketTerminal() {
               submittedQty: finalQty,
               submittedAt: Date.now(),
             };
-            const tinyOrderTimeoutMs = 30000;
-            const standardOrderTimeoutMs = 90000;
+            const tinyOrderTimeoutMs = 15000;
+            const standardOrderTimeoutMs = 45000;
             const isTinyOrder = symbolClean === "BTCUSD"
               ? finalQty <= Math.max(0.002, (Number(curRef.liveMinCryptoOrderQty) || 0.0001) * 4)
               : finalQty <= Math.max(0.25, (Number(curRef.liveMinOrderQty) || 0.01) * 10);
@@ -1335,6 +1337,11 @@ export default function MarketTerminal() {
         }
         let errorMsg = err.message || "Broker block";
         const rawErrorMsg = String(errorMsg || "").toLowerCase();
+        const isNetworkFetchFailure =
+          rawErrorMsg.includes("failed to fetch") ||
+          rawErrorMsg.includes("networkerror") ||
+          rawErrorMsg.includes("load failed") ||
+          rawErrorMsg.includes("network request failed");
         if (side === "BUY" && rawErrorMsg.includes("insufficient buying power")) {
           const cooldownMs = 3 * 60 * 1000;
           autopilotBuyCooldownUntilRef.current[symbolClean] = Date.now() + cooldownMs;
@@ -1344,6 +1351,11 @@ export default function MarketTerminal() {
           errorMsg = "Account is not allowed to short. Standard Alpaca Cash and non-margin accounts cannot short-sell. Swap to Local Risk Simulator to fully trade short strategies!";
         } else if (errorMsg.includes("insufficient buying power")) {
           errorMsg = "Insufficient buying power in your Alpaca account. Use smaller positions or switch to Local Risk Simulator mode!";
+        }
+        if (isNetworkFetchFailure && curRef.useAlpacaLive) {
+          setIsAutopilotActive(false);
+          addAutopilotLog("Live API/network unavailable (Failed to fetch). Autopilot auto-paused to stop retry spam.", "warn");
+          addLog("SYSTEM", "AUTOPILOT_AUTO_PAUSED", "Autopilot paused automatically because local API/network was unreachable.", "WARNING");
         }
         addAutopilotLog(`Automated Live Order REJECTED: ${errorMsg}`, "warn");
         addLog(symbolClean, `AUTO_${side}_FAILED`, errorMsg, "CRITICAL");
@@ -1654,7 +1666,25 @@ export default function MarketTerminal() {
         .split(/[\s,]+/)
         .map((s: string) => s.trim().toUpperCase())
         .filter(Boolean);
-      const scanTargets = parsedTargets.length > 0 ? parsedTargets : ["AAPL"];
+      const nowTs = Date.now();
+      const isLossGuardTemporarilyBlocked = (sym: string) => (autopilotLossGuardBlockedUntilRef.current[sym] || 0) > nowTs;
+      const blacklistSet = new Set((curRef.autopilotBlacklist || []).map((s: string) => s.toUpperCase()));
+      const baseTargets = parsedTargets.length > 0 ? parsedTargets : ["AAPL"];
+      let scanTargets = baseTargets.filter((sym: string) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
+
+      // If user supplied only one target and it's temporarily blocked by Loss Guard,
+      // rotate through quick tickers instead of hammering the same blocked symbol.
+      if (baseTargets.length <= 1 && scanTargets.length === 0) {
+        const dynamicPool = Array.from(new Set([...baseTargets, ...quickTickers.map((s) => s.toUpperCase())]));
+        scanTargets = dynamicPool.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
+        if (scanTargets.length > 0) {
+          addAutopilotLog(`Primary symbol ${baseTargets[0]} is Loss-Guard blocked. Rotating to alternate targets: ${scanTargets.slice(0, 5).join(", ")}${scanTargets.length > 5 ? "..." : ""}`, "info");
+        }
+      }
+
+      if (scanTargets.length === 0) {
+        scanTargets = baseTargets;
+      }
       const targetIdx = autopilotTargetSymbolIndexRef.current % scanTargets.length;
       const targetSymbol = scanTargets[targetIdx];
       autopilotTargetSymbolIndexRef.current = (targetIdx + 1) % scanTargets.length;
@@ -2552,7 +2582,7 @@ export default function MarketTerminal() {
     } finally {
       setIsAutopilotRunning(false);
     }
-  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, addAutopilotLog, logScanOrderOutcome]);
+  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, addAutopilotLog, logScanOrderOutcome, quickTickers]);
 
   useEffect(() => {
     if (!useAlpacaLive) return;
@@ -5311,6 +5341,7 @@ if __name__ == "__main__":
                         onChange={(e) => setAutopilotInterval(parseInt(e.target.value))}
                         className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
                       >
+                        <option value="5">Every 5 Seconds</option>
                         <option value="10">Every 10 Seconds</option>
                         <option value="15">Every 15 Seconds</option>
                         <option value="30">Every 30 Seconds</option>
