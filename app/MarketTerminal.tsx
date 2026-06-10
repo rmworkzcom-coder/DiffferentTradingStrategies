@@ -315,6 +315,30 @@ export default function MarketTerminal() {
     }, 4000);
   }, []);
 
+  // Helper log function (hoisted so effects can depend on it safely)
+  const addLog = useCallback(
+    (
+      symbol: string,
+      action: string,
+      message: string,
+      status: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO"
+    ) => {
+      const newLog: Log = {
+        id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+        timestamp: new Date().toLocaleTimeString(),
+        symbol,
+        action,
+        message,
+        status,
+      };
+      setLogs((prev) => [newLog, ...prev].slice(0, 50));
+
+      // Automatically trigger visual Toast notification for user action/system logs
+      showToast(`${symbol} • ${action}: ${message}`, status);
+    },
+    [showToast]
+  );
+
   // --- SENTRY AUTOPILOT STATE VARIABLES & ENGINES ---
   const [isAutopilotActive, setIsAutopilotActive] = useState(false);
   const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER" | "TOUCH_TURN" | "MACD_FRONT_SIDE" | "SNEAKY_PIVOT">("GEMINI_AI");
@@ -2318,29 +2342,7 @@ export default function MarketTerminal() {
     initApp();
   }, []);
 
-  // Helper log function
-  const addLog = useCallback(
-    (
-      symbol: string,
-      action: string,
-      message: string,
-      status: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO"
-    ) => {
-      const newLog: Log = {
-        id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-        timestamp: new Date().toLocaleTimeString(),
-        symbol,
-        action,
-        message,
-        status,
-      };
-      setLogs((prev) => [newLog, ...prev].slice(0, 50));
-
-      // Automatically trigger visual Toast notification for user action/system logs
-      showToast(`${symbol} • ${action}: ${message}`, status);
-    },
-    [showToast]
-  );
+  // (moved) addLog hoisted earlier
 
   // Connect & fetch from Alpaca
   const handleConnectAlpaca = async () => {
