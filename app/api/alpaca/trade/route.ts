@@ -117,7 +117,16 @@ export async function POST(req: Request) {
     }
 
     const orderResponseData = await orderRes.json();
-    return NextResponse.json(orderResponseData);
+    return NextResponse.json({
+      ...orderResponseData,
+      submission_meta: {
+        submitted_type: payload.type,
+        submitted_tif: payload.time_in_force,
+        submitted_extended_hours: !!payload.extended_hours,
+        submitted_limit_price: payload.limit_price || null,
+        server_path: canUseExtendedEquityPath ? "extended-hours-limit" : "default-market",
+      },
+    });
   } catch (error: any) {
     console.error("Alpaca Order Proxy Error:", error);
     return NextResponse.json(

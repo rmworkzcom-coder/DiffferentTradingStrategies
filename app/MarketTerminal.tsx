@@ -1129,6 +1129,10 @@ export default function MarketTerminal() {
         const brokerStatus = String(dataOrder.status || "ACCEPTED").toUpperCase();
         const filledQty = Number.parseFloat(String(dataOrder.filled_qty ?? "0"));
         const isFilledStatus = brokerStatus === "FILLED" || brokerStatus === "PARTIALLY_FILLED";
+        const submissionMeta = dataOrder.submission_meta;
+        const routeDescriptor = submissionMeta
+          ? `${submissionMeta.server_path}${submissionMeta.submitted_limit_price ? ` @ ${submissionMeta.submitted_limit_price}` : ""}`
+          : "broker-default";
 
         if (side === "BUY") {
           if (isFilledStatus) {
@@ -1143,16 +1147,16 @@ export default function MarketTerminal() {
         }
 
         if (isFilledStatus) {
-          addAutopilotLog(`Automated Live Order FILLED! ID: ${dataOrder.id || "Success"}.`, "success");
+          addAutopilotLog(`Automated Live Order FILLED! ID: ${dataOrder.id || "Success"}. Path: ${routeDescriptor}.`, "success");
           addLog(
             symbolClean,
             `${side}_FILLED`,
-            `Live automated market order executed for ${(Number.isFinite(filledQty) && filledQty > 0 ? filledQty : finalQty)} share(s) of ${symbolClean}.`,
+            `Live automated order executed for ${(Number.isFinite(filledQty) && filledQty > 0 ? filledQty : finalQty)} share(s) of ${symbolClean}. Path: ${routeDescriptor}.`,
             "SUCCESS"
           );
         } else {
-          addAutopilotLog(`Automated Live Order ACCEPTED by broker (status: ${brokerStatus}). Awaiting fill confirmation...`, "info");
-          addLog(symbolClean, `${side}_ACCEPTED`, `Live automated order accepted by broker (status: ${brokerStatus}).`, "INFO");
+          addAutopilotLog(`Automated Live Order ACCEPTED by broker (status: ${brokerStatus}, path: ${routeDescriptor}). Awaiting fill confirmation...`, "info");
+          addLog(symbolClean, `${side}_ACCEPTED`, `Live automated order accepted by broker (status: ${brokerStatus}, path: ${routeDescriptor}).`, "INFO");
         }
 
         const newOrderObj: Order = {
