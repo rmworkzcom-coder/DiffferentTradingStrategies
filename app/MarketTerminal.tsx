@@ -594,6 +594,7 @@ export default function MarketTerminal() {
   const prevAutopilotActiveRef = useRef<boolean | null>(null);
   const sentryHealthStateRef = useRef<"healthy" | "warning" | null>(null);
   const autopilotPendingBuySymbolsRef = useRef<Set<string>>(new Set());
+  const autopilotPendingBuyMetaRef = useRef<Record<string, { baseQty: number; submittedQty: number; submittedAt: number }>>({});
   const autopilotBuyCooldownUntilRef = useRef<Record<string, number>>({});
   const autopilotTargetSymbolIndexRef = useRef(0);
   const LIQUIDATION_COOLDOWN_MS = 30 * 60 * 1000;
@@ -654,6 +655,39 @@ export default function MarketTerminal() {
 
         setAlpacaAccount(rawData.account);
         setAlpacaPositions(rawData.positions);
+        {
+          const refreshedQtyBySymbol: Record<string, number> = {};
+          for (const p of (rawData.positions || [])) {
+            const sym = String(p?.symbol || "").toUpperCase();
+            if (!sym) continue;
+            refreshedQtyBySymbol[sym] = Number(p?.qty || 0);
+          }
+          const pendingSymbols = Array.from(autopilotPendingBuySymbolsRef.current);
+          for (const sym of pendingSymbols) {
+            const meta = autopilotPendingBuyMetaRef.current[sym];
+            const currentQty = refreshedQtyBySymbol[sym] || 0;
+            const baseQty = meta?.baseQty ?? 0;
+            if (currentQty > baseQty + 0.00005) {
+              autopilotPendingBuySymbolsRef.current.delete(sym);
+              delete autopilotPendingBuyMetaRef.current[sym];
+            }
+          }
+          setLastAutopilotOrderOutcome((prev) => {
+            if (!prev || prev.status !== "PENDING") return prev;
+            const sym = String(prev.symbol || "").toUpperCase();
+            const meta = autopilotPendingBuyMetaRef.current[sym];
+            const currentQty = refreshedQtyBySymbol[sym] || 0;
+            const baseQty = meta?.baseQty ?? 0;
+            if (!(currentQty > baseQty + 0.00005)) return prev;
+            return {
+              ...prev,
+              status: "FILLED",
+              code: "FILLED",
+              executedQty: Number.isFinite(meta?.submittedQty) ? (meta?.submittedQty || prev.requestedQty) : prev.requestedQty,
+              message: "Broker fill confirmed on refresh."
+            };
+          });
+        }
         addLog("ANGELONE", "SYNC", "Indian market portfolio successfully synced.", "SUCCESS");
       } else {
         if (!apiKey || !apiSecret) return;
@@ -677,6 +711,39 @@ export default function MarketTerminal() {
 
         setAlpacaAccount(rawData.account);
         setAlpacaPositions(rawData.positions);
+        {
+          const refreshedQtyBySymbol: Record<string, number> = {};
+          for (const p of (rawData.positions || [])) {
+            const sym = String(p?.symbol || "").toUpperCase();
+            if (!sym) continue;
+            refreshedQtyBySymbol[sym] = Number(p?.qty || 0);
+          }
+          const pendingSymbols = Array.from(autopilotPendingBuySymbolsRef.current);
+          for (const sym of pendingSymbols) {
+            const meta = autopilotPendingBuyMetaRef.current[sym];
+            const currentQty = refreshedQtyBySymbol[sym] || 0;
+            const baseQty = meta?.baseQty ?? 0;
+            if (currentQty > baseQty + 0.00005) {
+              autopilotPendingBuySymbolsRef.current.delete(sym);
+              delete autopilotPendingBuyMetaRef.current[sym];
+            }
+          }
+          setLastAutopilotOrderOutcome((prev) => {
+            if (!prev || prev.status !== "PENDING") return prev;
+            const sym = String(prev.symbol || "").toUpperCase();
+            const meta = autopilotPendingBuyMetaRef.current[sym];
+            const currentQty = refreshedQtyBySymbol[sym] || 0;
+            const baseQty = meta?.baseQty ?? 0;
+            if (!(currentQty > baseQty + 0.00005)) return prev;
+            return {
+              ...prev,
+              status: "FILLED",
+              code: "FILLED",
+              executedQty: Number.isFinite(meta?.submittedQty) ? (meta?.submittedQty || prev.requestedQty) : prev.requestedQty,
+              message: "Broker fill confirmed on refresh."
+            };
+          });
+        }
         addLog("ALPACA", "SYNC", "Real-time positions and balances successfully synced.", "SUCCESS");
       }
     } catch (err: any) {
@@ -1172,8 +1239,15 @@ export default function MarketTerminal() {
         if (side === "BUY") {
           if (isFilledStatus) {
             autopilotPendingBuySymbolsRef.current.delete(symbolClean);
+            delete autopilotPendingBuyMetaRef.current[symbolClean];
           } else {
+            const existingOwnedQty = Math.max(0, Number(existingPositionBeforeOrder?.qty || 0));
             autopilotPendingBuySymbolsRef.current.add(symbolClean);
+            autopilotPendingBuyMetaRef.current[symbolClean] = {
+              baseQty: existingOwnedQty,
+              submittedQty: finalQty,
+              submittedAt: Date.now(),
+            };
             const tinyOrderTimeoutMs = 30000;
             const standardOrderTimeoutMs = 90000;
             const isTinyOrder = symbolClean === "BTCUSD"
@@ -1183,6 +1257,16 @@ export default function MarketTerminal() {
             // Avoid sticky pending state forever when broker status updates are delayed.
             setTimeout(() => {
               autopilotPendingBuySymbolsRef.current.delete(symbolClean);
+              delete autopilotPendingBuyMetaRef.current[symbolClean];
+              setLastAutopilotOrderOutcome((prev) => {
+                if (!prev || prev.status !== "PENDING" || prev.symbol !== symbolClean) return prev;
+                return {
+                  ...prev,
+                  status: "BLOCKED",
+                  code: "BLOCKED_BUY_COOLDOWN",
+                  message: `Pending broker confirmation timed out for ${symbolClean}. Auto-seed hold released.`
+                };
+              });
             }, pendingClearTimeoutMs);
           }
         }
@@ -1247,6 +1331,7 @@ export default function MarketTerminal() {
         console.error(err);
         if (side === "BUY") {
           autopilotPendingBuySymbolsRef.current.delete(symbolClean);
+          delete autopilotPendingBuyMetaRef.current[symbolClean];
         }
         let errorMsg = err.message || "Broker block";
         const rawErrorMsg = String(errorMsg || "").toLowerCase();
@@ -2468,6 +2553,22 @@ export default function MarketTerminal() {
       setIsAutopilotRunning(false);
     }
   }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, addAutopilotLog, logScanOrderOutcome]);
+
+  useEffect(() => {
+    if (!useAlpacaLive) return;
+    if (lastAutopilotOrderOutcome?.status !== "PENDING") return;
+    const intervalId = setInterval(() => {
+      handleRefreshData();
+    }, 5000);
+    const timeoutId = setTimeout(() => {
+      clearInterval(intervalId);
+    }, 60000);
+
+    return () => {
+      clearInterval(intervalId);
+      clearTimeout(timeoutId);
+    };
+  }, [useAlpacaLive, lastAutopilotOrderOutcome, handleRefreshData]);
 
   // Autopilot loop trigger
   useEffect(() => {
