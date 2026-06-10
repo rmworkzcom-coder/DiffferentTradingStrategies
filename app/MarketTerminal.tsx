@@ -175,6 +175,48 @@ function PositionSparkline({ symbol, currentPl, totalCost }: { symbol: string; c
 export default function MarketTerminal() {
   // Broker selection and credentials (Default to US Alpaca market)
   const [brokerType, setBrokerType] = useState<"ALPACA" | "ANGELONE">("ALPACA");
+  
+  // Toast for short-term action summaries
+  const [toast, setToast] = useState<{ message: string; level?: "info" | "success" | "warn" | "error" } | null>(null);
+
+  // Immediate deleverage command callable from UI
+  const performDeleverage = useCallback(async () => {
+    const curRef = stateRef.current;
+    addAutopilotLog(`Manual deleverage requested. Evaluating exposures...`, "info");
+  
+    const currentActivePositions: Position[] = curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions;
+    if (!currentActivePositions || currentActivePositions.length === 0) {
+      addAutopilotLog("Nothing to deleverage: no active positions.", "warn");
+      return;
+    }
+  
+    const highestExposure = [...currentActivePositions].sort((a, b) => {
+      const aCost = a.current_price * Math.abs(a.qty) * a.maintenance_margin_rate;
+      const bCost = b.current_price * Math.abs(b.qty) * b.maintenance_margin_rate;
+      return bCost - aCost;
+    })[0];
+  
+    if (!highestExposure) {
+      addAutopilotLog("No exposures found for deleveraging.", "warn");
+      return;
+    }
+  
+    const qtyAbs = Math.abs(highestExposure.qty);
+    const rawQty = Math.max(1, Math.round(qtyAbs * (curRef.aggressiveDeleverage ? 0.5 : 0.2)) || 1);
+  
+    if (highestExposure.qty > 0) {
+      addAutopilotLog(`Manual deleverage: selling ${rawQty} of ${highestExposure.symbol}.`, "warn");
+      await executeAutopilotOrder(highestExposure.symbol, "SELL", rawQty);
+      setToast({ message: `Sold ${rawQty} ${highestExposure.symbol}`, level: "success" });
+    } else {
+      addAutopilotLog(`Manual deleverage: buying ${rawQty} to cover short ${highestExposure.symbol}.`, "warn");
+      await executeAutopilotOrder(highestExposure.symbol, "BUY", rawQty);
+      setToast({ message: `Covered ${rawQty} ${highestExposure.symbol}`, level: "success" });
+    }
+
+    // auto-clear toast after 4 seconds
+    setTimeout(() => setToast(null), 4000);
+  }, []);
 
   // Alpaca States API key configuration
   const [apiKey, setApiKey] = useState("");
@@ -347,6 +389,7 @@ export default function MarketTerminal() {
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
   const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(5); // percent of portfolio per symbol
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(6); // concurrent open positions
+  const [aggressiveDeleverage, setAggressiveDeleverage] = useState<boolean>(false);
 
   // Load persisted global TP/SL from localStorage on mount
   useEffect(() => {
@@ -369,9 +412,17 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:minAvgVol", String(minAvgVolume));
         localStorage.setItem("sentry:maxExposurePct", String(maxExposurePercentPerSymbol));
         localStorage.setItem("sentry:maxConcurrent", String(maxConcurrentPositions));
+        localStorage.setItem("sentry:aggressiveDeleverage", JSON.stringify(aggressiveDeleverage));
       }
     } catch (e) {}
   }, [globalTakeProfitPercent, globalStopLossPercent]);
+
+  useEffect(() => {
+    try {
+      const raw = typeof window !== "undefined" && localStorage.getItem("sentry:aggressiveDeleverage");
+      if (raw) setAggressiveDeleverage(raw === "true" || JSON.parse(raw));
+    } catch (e) {}
+  }, []);
 
   const targetSymbols = useMemo(() => {
     return autopilotTargetTicker
@@ -1115,7 +1166,7 @@ export default function MarketTerminal() {
             })[0];
             
             const qtyAbs = Math.abs(highestExposure.qty);
-            const rawQty = Math.max(1, Math.round(qtyAbs * 0.2) || 1);
+            const rawQty = Math.max(1, Math.round(qtyAbs * (curRef.aggressiveDeleverage ? 0.5 : 0.2)) || 1);
             
             if (highestExposure.qty > 0) {
               addAutopilotLog(`Triggered auto-deleveraging order to sell ${rawQty} of high-beta long asset ${highestExposure.symbol}.`, "warn");
@@ -2320,6 +2371,53 @@ export default function MarketTerminal() {
     addLog("ALPACA", "DISCONNECT", "Switched back to Local Risk Simulator mode.", "INFO");
   };
 
+  // Test live connection without persisting or switching modes
+  const handleTestConnection = async () => {
+    try {
+      if (brokerType === "ANGELONE") {
+        if (!angelApiKey || !angelClientCode || !angelMpin) {
+          showToast("AngelOne keys missing — enter credentials to test.", "CRITICAL");
+          return;
+        }
+        showToast("Testing AngelOne connection...", "INFO");
+        const res = await fetch("/api/angelone", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ angelApiKey, angelClientCode, angelMpin, angelTotpSeed, isMockConnection: false }),
+        });
+        const text = await res.text();
+        const raw = JSON.parse(text);
+        if (!res.ok || raw?.error) {
+          showToast(`AngelOne Test Failed: ${raw?.error || "Unknown error"}`, "CRITICAL");
+        } else {
+          showToast(`AngelOne OK — Cash: ₹${parseFloat(raw.account.cash).toLocaleString()}`, "SUCCESS");
+        }
+      } else {
+        // Alpaca
+        if (!apiKey || !apiSecret) {
+          showToast("Alpaca API Key/Secret missing — enter keys to test.", "CRITICAL");
+          return;
+        }
+        showToast("Testing Alpaca connection...", "INFO");
+        const res = await fetch("/api/alpaca", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey, apiSecret, isPaper }),
+        });
+        const text = await res.text();
+        const raw = JSON.parse(text);
+        if (!res.ok || raw?.error) {
+          showToast(`Alpaca Test Failed: ${raw?.error || "Unable to authenticate"}`, "CRITICAL");
+        } else {
+          showToast(`Alpaca OK — Cash: $${parseFloat(raw.account.cash).toLocaleString()}`, "SUCCESS");
+        }
+      }
+    } catch (err: any) {
+      console.error("Test connection error:", err);
+      showToast(`Test Failed: ${err?.message || err}`, "CRITICAL");
+    }
+  };
+
   // Calculations for current active mode
   const activePositions = useAlpacaLive ? alpacaPositions : mockPositions;
   const activeCash = useAlpacaLive
@@ -3375,6 +3473,21 @@ if __name__ == "__main__":
         </div>
       )}
 
+      {/* Transient Toast */}
+      {toast && (
+        <div className="fixed top-6 right-6 z-60">
+          <div
+            role="status"
+            aria-live="polite"
+            className={`rounded-lg px-4 py-2 shadow-md text-sm font-medium ${
+              toast.level === "success" ? "bg-green-700 text-white" : toast.level === "warn" ? "bg-yellow-700 text-black" : "bg-gray-800 text-white"
+            }`}
+          >
+            {toast.message}
+          </div>
+        </div>
+      )}
+
       {/* Hero Header */}
       <header className="mb-8 border-b border-brand-border pb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4" id="header-widget">
         <div id="header-branding">
@@ -3569,24 +3682,33 @@ if __name__ == "__main__":
                 </button>
               </div>
             ) : (
-              <button
-                id="connect-alpaca-button"
-                onClick={handleConnectAlpaca}
-                disabled={isConnecting}
-                className="w-full bg-brand-green hover:bg-brand-green/90 text-brand-bg md:text-sm text-xs font-bold uppercase tracking-wider p-3 rounded-lg transition disabled:opacity-50 flex items-center justify-center gap-2 font-mono"
-              >
-                {isConnecting ? (
-                  <>
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                    <span>AUTHENTICATING CLIENT...</span>
-                  </>
-                ) : (
-                  <>
-                    <Zap className="h-4 w-4" />
-                    <span>CONNECT ALPACA PORTFOLIO</span>
-                  </>
-                )}
-              </button>
+              <>
+                <button
+                  id="connect-alpaca-button"
+                  onClick={handleConnectAlpaca}
+                  disabled={isConnecting}
+                  className="w-full bg-brand-green hover:bg-brand-green/90 text-brand-bg md:text-sm text-xs font-bold uppercase tracking-wider p-3 rounded-lg transition disabled:opacity-50 flex items-center justify-center gap-2 font-mono"
+                >
+                  {isConnecting ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <span>AUTHENTICATING CLIENT...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="h-4 w-4" />
+                      <span>CONNECT ALPACA PORTFOLIO</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  id="test-live-connection"
+                  onClick={handleTestConnection}
+                  className="mt-2 w-full bg-brand-bg/60 border border-brand-border text-xs text-gray-300 p-2 rounded-lg hover:bg-brand-bg/70"
+                >
+                  Test Live Connection
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -4643,6 +4765,44 @@ if __name__ == "__main__":
                         className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
                       />
                       <p className="text-[9px] text-gray-500 mt-1">Limit concurrent open positions to reduce concentration.</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3 mt-3 font-mono text-sm">
+                    <div className="flex-1">
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Margin Warning Threshold</label>
+                      <div className="flex gap-2">
+                        <input
+                          id="warn-threshold-input"
+                          type="number"
+                          min={1}
+                          max={99}
+                          step={1}
+                          value={warnThreshold}
+                          onChange={(e) => setWarnThreshold(Math.max(1, Math.min(99, parseInt(e.target.value || "1"))))}
+                          className="w-24 bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                        />
+                        <p className="text-[11px] text-gray-400 self-center">% of equity used for maintenance margin before Deleverage triggers.</p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Aggressive Deleverage</label>
+                      <input
+                        id="aggressive-deleverage-toggle"
+                        type="checkbox"
+                        checked={aggressiveDeleverage}
+                        onChange={(e) => setAggressiveDeleverage(e.target.checked)}
+                        className="h-4 w-4 cursor-pointer"
+                      />
+                      <button
+                        id="force-deleverage-now"
+                        type="button"
+                        onClick={() => performDeleverage()}
+                        className="ml-3 px-2 py-1 bg-red-700 hover:bg-red-800 text-white rounded text-xs font-bold"
+                      >
+                        Deleverage Now
+                      </button>
                     </div>
                   </div>
 
