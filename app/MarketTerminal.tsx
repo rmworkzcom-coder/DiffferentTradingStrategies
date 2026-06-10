@@ -339,6 +339,40 @@ export default function MarketTerminal() {
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
   const [activeVisualizerSymbol, setActiveVisualizerSymbol] = useState<string>("");
 
+  // Global automated exit thresholds (percent)
+  const [globalTakeProfitPercent, setGlobalTakeProfitPercent] = useState<number>(15); // e.g. 15% take profit
+  const [globalStopLossPercent, setGlobalStopLossPercent] = useState<number>(5); // e.g. 5% stop loss
+
+  // Risk screening & diversification controls
+  const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
+  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(5); // percent of portfolio per symbol
+  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(6); // concurrent open positions
+
+  // Load persisted global TP/SL from localStorage on mount
+  useEffect(() => {
+    try {
+      const tp = typeof window !== "undefined" && localStorage.getItem("sentry:globalTP");
+      const sl = typeof window !== "undefined" && localStorage.getItem("sentry:globalSL");
+      if (tp) setGlobalTakeProfitPercent(Math.max(0, parseFloat(tp)));
+      if (sl) setGlobalStopLossPercent(Math.max(0, parseFloat(sl)));
+    } catch (e) {
+      // ignore
+    }
+  }, []);
+
+  // Persist TP/SL whenever they change
+  useEffect(() => {
+    try {
+      if (typeof window !== "undefined") {
+        localStorage.setItem("sentry:globalTP", String(globalTakeProfitPercent));
+        localStorage.setItem("sentry:globalSL", String(globalStopLossPercent));
+        localStorage.setItem("sentry:minAvgVol", String(minAvgVolume));
+        localStorage.setItem("sentry:maxExposurePct", String(maxExposurePercentPerSymbol));
+        localStorage.setItem("sentry:maxConcurrent", String(maxConcurrentPositions));
+      }
+    } catch (e) {}
+  }, [globalTakeProfitPercent, globalStopLossPercent]);
+
   const targetSymbols = useMemo(() => {
     return autopilotTargetTicker
       .split(/[\s,]+/)
@@ -352,6 +386,29 @@ export default function MarketTerminal() {
     }
     return targetSymbols[0] || "AAPL";
   }, [activeVisualizerSymbol, targetSymbols]);
+
+  // Configurable quick tickers list (expandable). Use a memo to avoid re-creating on every render.
+  const quickTickers = useMemo(
+    () => [
+      "AAPL",
+      "NVDA",
+      "TSLA",
+      "MSFT",
+      "GOOG",
+      "AMZN",
+      "META",
+      "BTCUSD",
+      "ETHUSD",
+      "SPY",
+      "QQQ",
+      "AMD",
+      "INTC",
+      "NFLX",
+      "BABA",
+      "ORCL",
+    ],
+    []
+  );
 
   // Derived states to maintain 100% backward compatibility with all UI panels and graphs
   const touchTurnState = touchTurnStateMap[currentVizSymbol] || null;
@@ -513,7 +570,10 @@ export default function MarketTerminal() {
     touchTurnStateMap,
     macdStateMap,
     sneakyPivotStateMap,
-    autopilotBlacklist
+    autopilotBlacklist,
+    minAvgVolume,
+    maxExposurePercentPerSymbol,
+    maxConcurrentPositions
   });
 
   useEffect(() => {
@@ -541,7 +601,12 @@ export default function MarketTerminal() {
       touchTurnStateMap,
       macdStateMap,
       sneakyPivotStateMap,
-      autopilotBlacklist
+      globalTakeProfitPercent,
+      globalStopLossPercent,
+      autopilotBlacklist,
+      minAvgVolume,
+      maxExposurePercentPerSymbol,
+      maxConcurrentPositions
     };
   }, [
     useAlpacaLive,
@@ -567,6 +632,11 @@ export default function MarketTerminal() {
     touchTurnStateMap,
     macdStateMap,
     sneakyPivotStateMap,
+    globalTakeProfitPercent,
+    globalStopLossPercent,
+    minAvgVolume,
+    maxExposurePercentPerSymbol,
+    maxConcurrentPositions,
     autopilotBlacklist
   ]);
 
@@ -609,6 +679,38 @@ export default function MarketTerminal() {
           }
         }
       }
+    }
+
+    // Portfolio risk screening: exposure caps and concurrent positions
+    try {
+      const activePositions = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
+      const totalPosValue = (activePositions || []).reduce((s: number, p: any) => s + (parseFloat(p.market_value || p.current_price * (parseFloat(p.qty || 0) || 0)) || 0), 0);
+      const cashValue = curRef.useAlpacaLive ? parseFloat(curRef.alpacaAccount?.cash || "0") : (parseFloat(curRef.simCash as any) || 0);
+      const totalPortfolio = Math.max(1, totalPosValue + cashValue);
+
+      const openCount = (activePositions || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
+      if (side === "BUY" && openCount >= (curRef.maxConcurrentPositions || 999)) {
+        addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${curRef.maxConcurrentPositions}) reached.`, "warn");
+        addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: concurrent positions limit reached.`, "WARNING");
+        return;
+      }
+
+      // Estimate current exposure and intended order value
+      const matchedTicker = activePositions.find((p: any) => p.symbol === symbolClean) as any;
+      const currentPosVal = matchedTicker ? parseFloat(matchedTicker.market_value || (matchedTicker.current_price * (parseFloat(matchedTicker.qty || 0) || 0)) || 0) : 0;
+      // Fallback price guess
+      const guessPrice = matchedTicker ? parseFloat(matchedTicker.current_price || 0) : (symbolClean === "BTCUSD" ? 67200 : 150);
+      const intendedValue = Math.abs(qtyNum) * guessPrice;
+      const newExposurePct = ((currentPosVal + intendedValue) / totalPortfolio) * 100;
+
+      if (side === "BUY" && (newExposurePct > (curRef.maxExposurePercentPerSymbol || 100))) {
+        addAutopilotLog(`🚫 Blocked BUY ${symbolClean}: post-order exposure ${newExposurePct.toFixed(2)}% would exceed ${curRef.maxExposurePercentPerSymbol}% limit.`, "warn");
+        addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: exposure cap exceeded (${newExposurePct.toFixed(2)}%).`, "WARNING");
+        return;
+      }
+    } catch (e) {
+      // if anything fails, do not block trades silently; just log
+      console.warn("Risk screening error", e);
     }
 
     if (curRef.useAlpacaLive) {
@@ -1221,6 +1323,27 @@ export default function MarketTerminal() {
               }
             }
 
+            // Also enforce global percent-based TP/SL (quant-style)
+            try {
+              const cur = stateRef.current as any;
+              const entry = (tState as any).entryPrice || tState.limitPrice || 0;
+              if (entry && cur && (cur.globalTakeProfitPercent || cur.globalStopLossPercent)) {
+                const isBuy = tState.side === "BUY";
+                const pct = isBuy
+                  ? ((currentSpotPrice - entry) / entry) * 100
+                  : ((entry - currentSpotPrice) / entry) * 100;
+                if (pct >= (cur.globalTakeProfitPercent || 0)) {
+                  stateChange = "HIT_TARGET";
+                  addAutopilotLog(`⚖️ Global TP (${cur.globalTakeProfitPercent}%) reached: ${pct.toFixed(2)}%. Forcing exit.`, "info");
+                } else if (pct <= -(cur.globalStopLossPercent || 0)) {
+                  stateChange = "HIT_STOP";
+                  addAutopilotLog(`⚖️ Global SL (${cur.globalStopLossPercent}%) breached: ${pct.toFixed(2)}%. Forcing exit.`, "warn");
+                }
+              }
+            } catch (e) {
+              // fail silently
+            }
+
             if (stateChange === "HIT_TARGET") {
               const oppositeSide = tState.side === "BUY" ? "SELL" : "BUY";
               addAutopilotLog(`🎉 Take Profit target met at ${curPrefix}${currentSpotPrice.toFixed(2)}! Mean reversion complete for 2:1 profit.`, "success");
@@ -1637,6 +1760,24 @@ export default function MarketTerminal() {
               }
             }
 
+            // Global percent-based TP/SL enforcement
+            try {
+              const cur = stateRef.current as any;
+              const entry = (sState as any).entryPrice || entryPrice || 0;
+              if (entry && cur && (cur.globalTakeProfitPercent || cur.globalStopLossPercent)) {
+                const isBuy = sState.side === "BUY";
+                const pct = isBuy ? ((currentSpotPrice - entry) / entry) * 100 : ((entry - currentSpotPrice) / entry) * 100;
+                if (pct >= (cur.globalTakeProfitPercent || 0)) {
+                  stateChange = "HIT_TARGET";
+                  addAutopilotLog(`⚖️ Global TP (${cur.globalTakeProfitPercent}%) reached: ${pct.toFixed(2)}%. Forcing exit.`, "info");
+                } else if (pct <= -(cur.globalStopLossPercent || 0)) {
+                  stateChange = "HIT_STOP";
+                  addAutopilotLog(`⚖️ Global SL (${cur.globalStopLossPercent}%) breached: ${pct.toFixed(2)}%. Forcing exit.`, "warn");
+                }
+              }
+            } catch (e) {
+              // silent
+            }
             if (stateChange === "HIT_TARGET") {
               const oppositeSide = sState.side === "BUY" ? "SELL" : "BUY";
               addAutopilotLog(`🎉 Take Profit target successfully met at ${curPrefix}${currentSpotPrice.toFixed(2)}! Opposite pivot zone reached.`, "success");
@@ -2911,13 +3052,45 @@ export default function MarketTerminal() {
     }
   };
 
+  // Confirmation modal state and helpers
+  const [confirmModalOpen, setConfirmModalOpen] = useState(false);
+  const [confirmModalType, setConfirmModalType] = useState<"position" | "portfolio" | null>(null);
+  const [confirmModalSymbol, setConfirmModalSymbol] = useState<string | null>(null);
+
+  const openConfirmForPosition = (symbol: string) => {
+    setConfirmModalType("position");
+    setConfirmModalSymbol(symbol.toUpperCase().trim());
+    setConfirmModalOpen(true);
+  };
+
+  const openConfirmForPortfolio = () => {
+    setConfirmModalType("portfolio");
+    setConfirmModalSymbol(null);
+    setConfirmModalOpen(true);
+  };
+
+  const handleConfirmModalCancel = () => {
+    setConfirmModalOpen(false);
+    setConfirmModalType(null);
+    setConfirmModalSymbol(null);
+  };
+
+  const handleConfirmModalConfirm = async () => {
+    setConfirmModalOpen(false);
+    if (confirmModalType === "position" && confirmModalSymbol) {
+      await handleLiquidatePosition(confirmModalSymbol);
+    } else if (confirmModalType === "portfolio") {
+      await handleLiquidatePortfolio(true as any);
+    }
+    setConfirmModalType(null);
+    setConfirmModalSymbol(null);
+  };
+
   const handleLiquidatePortfolio = async () => {
     // Elegant system confirmation before full destruction
-    if (!window.confirm("CRITICAL WARNING: Are you sure you want to LIQUIDATE your ENTIRE portfolio holding? All active items will be immediately sold out to cash.")) {
-      return;
-    }
-    
     setIsLiquidating("all");
+    
+    // (Note: when invoked from UI modal we bypass native confirm)
     addLog("PORTFOLIO", "LIQUIDATE_ALL_START", "Triggering global panic liquidation for all asset classes.", "WARNING");
     
     try {
@@ -3153,6 +3326,24 @@ if __name__ == "__main__":
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 bg-brand-bg md:p-8" id="root-container">
+      {/* Confirmation Modal */}
+      {confirmModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={handleConfirmModalCancel} />
+          <div className="relative bg-brand-card rounded-lg p-5 z-10 w-full max-w-md border border-brand-border">
+            <h3 className="text-lg font-bold text-white mb-2">{confirmModalType === "portfolio" ? "Confirm Portfolio Liquidation" : `Confirm Liquidation: ${confirmModalSymbol}`}</h3>
+            <p className="text-sm text-gray-400 mb-4">
+              {confirmModalType === "portfolio"
+                ? "This will sell ALL open positions immediately and convert them to cash. This action cannot be undone."
+                : `This will sell all shares of ${confirmModalSymbol} and convert the position to cash. Proceed?`}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button onClick={handleConfirmModalCancel} className="px-3 py-2 rounded bg-brand-bg border border-brand-border text-sm text-gray-300">Cancel</button>
+              <button onClick={handleConfirmModalConfirm} className="px-3 py-2 rounded bg-red-600 hover:bg-red-700 text-white text-sm font-bold">Confirm Liquidation</button>
+            </div>
+          </div>
+        </div>
+      )}
       
       {/* Risk Alert Banner */}
       {marginRiskStatus !== "SAFE" && (
@@ -3876,7 +4067,7 @@ if __name__ == "__main__":
               {activePositions.length > 0 && (
                 <button
                   id="liquidate-portfolio-button"
-                  onClick={handleLiquidatePortfolio}
+                  onClick={openConfirmForPortfolio}
                   disabled={isLiquidating === "all"}
                   className="p-2 bg-red-950/80 hover:bg-red-900 border border-red-905 border-red-900/40 text-red-100 hover:text-white rounded-lg flex items-center gap-1.5 text-xs transition font-semibold"
                   title="Liquidate your entire portfolio immediately"
@@ -3960,7 +4151,7 @@ if __name__ == "__main__":
                           {useAlpacaLive ? (
                             <button
                               id={`liquidate-pos-${pos.symbol}`}
-                              onClick={() => handleLiquidatePosition(pos.symbol)}
+                              onClick={() => openConfirmForPosition(pos.symbol)}
                               disabled={isLiquidating !== null}
                               className="text-red-400 hover:text-white hover:bg-red-950/80 transition p-1.5 rounded-lg border border-transparent hover:border-red-900/50 flex items-center justify-center mx-auto"
                               title={`Liquidate all shares of ${pos.symbol}`}
@@ -3971,7 +4162,7 @@ if __name__ == "__main__":
                             <div className="flex items-center justify-center gap-2" id={`actions-container-${pos.symbol}`}>
                               <button
                                 id={`liquidate-mock-pos-${pos.symbol}`}
-                                onClick={() => handleLiquidatePosition(pos.symbol)}
+                                onClick={() => openConfirmForPosition(pos.symbol)}
                                 disabled={isLiquidating !== null}
                                 className="text-orange-400 hover:text-white hover:bg-orange-950/60 transition p-1.5 rounded-lg border border-transparent hover:border-orange-900/40"
                                 title={`Liquidate simulated position ${pos.symbol} (Sell to cash)`}
@@ -4107,7 +4298,7 @@ if __name__ == "__main__":
                 <div className="mb-4" id="quick-pickers-block">
                   <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2 font-mono">Quick Tickers</span>
                   <div className="flex flex-wrap gap-2" id="quick-tickers-group">
-                    {["AAPL", "NVDA", "TSLA", "BTCUSD", "MSFT"].map((symbol) => (
+                    {quickTickers.map((symbol) => (
                       <button
                         key={symbol}
                         id={`quick-ticker-pill-${symbol}`}
@@ -4348,6 +4539,110 @@ if __name__ == "__main__":
                         <option value="30">Every 30 Seconds</option>
                         <option value="60">Every 60 Seconds</option>
                       </select>
+                    </div>
+                  </div>
+
+                  {/* Global TP/SL controls */}
+                  <div className="grid grid-cols-2 gap-3 pt-2" id="global-tp-sl-row">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                        Global Take Profit %
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          id="global-tp-input"
+                          type="number"
+                          min={0}
+                          step={0.1}
+                          value={globalTakeProfitPercent}
+                          onChange={(e) => {
+                            const v = parseFloat(e.target.value);
+                            setGlobalTakeProfitPercent(Number.isFinite(v) ? Math.max(0, v) : 0);
+                          }}
+                          className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setGlobalTakeProfitPercent(15)}
+                          className="px-2 py-1 bg-brand-border hover:bg-brand-border/80 rounded text-[10px] font-bold"
+                        >
+                          Reset
+                        </button>
+                      </div>
+                      <p className="text-[9px] text-gray-500 mt-1">Autopilot will force-exit positions at or above this profit percent.</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                        Global Stop Loss %
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          id="global-sl-input"
+                          type="number"
+                          min={0}
+                          step={0.1}
+                          value={globalStopLossPercent}
+                          onChange={(e) => {
+                            const v = parseFloat(e.target.value);
+                            setGlobalStopLossPercent(Number.isFinite(v) ? Math.max(0, v) : 0);
+                          }}
+                          className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setGlobalStopLossPercent(5)}
+                          className="px-2 py-1 bg-brand-border hover:bg-brand-border/80 rounded text-[10px] font-bold"
+                        >
+                          Reset
+                        </button>
+                      </div>
+                      <p className="text-[9px] text-gray-500 mt-1">Autopilot will force-exit positions at or below this loss percent.</p>
+                    </div>
+                  </div>
+
+                  {/* Risk & diversification controls */}
+                  <div className="grid grid-cols-3 gap-3 pt-3" id="risk-diversify-row">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Min Avg Volume</label>
+                      <input
+                        id="min-avg-volume-input"
+                        type="number"
+                        min={0}
+                        step={10000}
+                        value={minAvgVolume}
+                        onChange={(e) => setMinAvgVolume(Number.isFinite(parseFloat(e.target.value)) ? Math.max(0, parseFloat(e.target.value)) : 0)}
+                        className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                      />
+                      <p className="text-[9px] text-gray-500 mt-1">Filter low-liquidity tickers (avg daily vol).</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Max Exposure % / Symbol</label>
+                      <input
+                        id="max-exposure-input"
+                        type="number"
+                        min={0}
+                        step={0.1}
+                        value={maxExposurePercentPerSymbol}
+                        onChange={(e) => setMaxExposurePercentPerSymbol(Number.isFinite(parseFloat(e.target.value)) ? Math.max(0, parseFloat(e.target.value)) : 0)}
+                        className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                      />
+                      <p className="text-[9px] text-gray-500 mt-1">Cap percent allocation per symbol.</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Max Concurrent Positions</label>
+                      <input
+                        id="max-concurrent-input"
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={maxConcurrentPositions}
+                        onChange={(e) => setMaxConcurrentPositions(Number.isFinite(parseFloat(e.target.value)) ? Math.max(1, parseInt(e.target.value)) : 1)}
+                        className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                      />
+                      <p className="text-[9px] text-gray-500 mt-1">Limit concurrent open positions to reduce concentration.</p>
                     </div>
                   </div>
 
