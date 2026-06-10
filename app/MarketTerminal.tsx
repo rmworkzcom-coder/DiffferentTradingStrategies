@@ -216,7 +216,7 @@ export default function MarketTerminal() {
 
     // auto-clear toast after 4 seconds
     setTimeout(() => setToast(null), 4000);
-  }, []);
+  }, [executeAutopilotOrder, addAutopilotLog]);
 
   // Alpaca States API key configuration
   const [apiKey, setApiKey] = useState("");
@@ -415,7 +415,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:aggressiveDeleverage", JSON.stringify(aggressiveDeleverage));
       }
     } catch (e) {}
-  }, [globalTakeProfitPercent, globalStopLossPercent]);
+  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, aggressiveDeleverage]);
 
   useEffect(() => {
     try {
@@ -2285,25 +2285,28 @@ export default function MarketTerminal() {
   }, []);
 
   // Helper log function
-  function addLog(
-    symbol: string,
-    action: string,
-    message: string,
-    status: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO"
-  ) {
-    const newLog: Log = {
-      id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-      timestamp: new Date().toLocaleTimeString(),
-      symbol,
-      action,
-      message,
-      status,
-    };
-    setLogs((prev) => [newLog, ...prev].slice(0, 50));
-    
-    // Automatically trigger visual Toast notification for user action/system logs
-    showToast(`${symbol} • ${action}: ${message}`, status);
-  }
+  const addLog = useCallback(
+    (
+      symbol: string,
+      action: string,
+      message: string,
+      status: "SUCCESS" | "WARNING" | "CRITICAL" | "INFO"
+    ) => {
+      const newLog: Log = {
+        id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+        timestamp: new Date().toLocaleTimeString(),
+        symbol,
+        action,
+        message,
+        status,
+      };
+      setLogs((prev) => [newLog, ...prev].slice(0, 50));
+
+      // Automatically trigger visual Toast notification for user action/system logs
+      showToast(`${symbol} • ${action}: ${message}`, status);
+    },
+    [showToast]
+  );
 
   // Connect & fetch from Alpaca
   const handleConnectAlpaca = async () => {
