@@ -31,6 +31,7 @@ import {
   DollarSign,
   Sliders,
   ShieldAlert,
+  Percent,
   Sparkles,
   Cpu,
   Eye,
@@ -90,6 +91,8 @@ type AutopilotOrderOutcomeCode =
   | "BLOCKED_SHORT_RESTRICTED"
   | "BLOCKED_NEGLIGIBLE_QTY"
   | "BLOCKED_BUYING_POWER"
+  | "BLOCKED_CRYPTO_ONLY"
+  | "BLOCKED_LIQUIDITY"
   | "REJECTED_BROKER";
 
 interface AutopilotOrderResult {
@@ -461,6 +464,8 @@ export default function MarketTerminal() {
   const [autopilotInterval, setAutopilotInterval] = useState(5); // in seconds
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
   const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
+  const [autopilotCryptoOnly, setAutopilotCryptoOnly] = useState<boolean>(false);
+  const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean; india: boolean; crypto: boolean }>({ wallStreet: false, india: false, crypto: false });
   const [activeVisualizerSymbol] = useState<string>("");
 
   // Global automated exit thresholds (percent)
@@ -471,6 +476,9 @@ export default function MarketTerminal() {
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
   const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(30); // percent of portfolio per symbol
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(10); // concurrent open positions
+  const [maxConcurrentCryptoPositions, setMaxConcurrentCryptoPositions] = useState<number>(3); // concurrent open crypto positions
+  const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
+  const [liquidationBeforeCloseMin, setLiquidationBeforeCloseMin] = useState<number>(5);
   const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum non-crypto live order size
   const [liveMinCryptoOrderQty, setLiveMinCryptoOrderQty] = useState<number>(0.0001); // minimum crypto live order size
   const [aggressiveDeleverage, setAggressiveDeleverage] = useState<boolean>(false);
@@ -498,12 +506,26 @@ export default function MarketTerminal() {
       const sl = typeof window !== "undefined" && localStorage.getItem("sentry:globalSL");
       const minLiveQty = typeof window !== "undefined" && localStorage.getItem("sentry:liveMinQty");
       const minLiveCryptoQty = typeof window !== "undefined" && localStorage.getItem("sentry:liveMinCryptoQty");
+      const maxConcurrentStored = typeof window !== "undefined" && localStorage.getItem("sentry:maxConcurrent");
+      const maxConcurrentCryptoStored = typeof window !== "undefined" && localStorage.getItem("sentry:maxConcurrentCrypto");
       const broadScan = typeof window !== "undefined" && localStorage.getItem("sentry:scanBroadUniverse");
+      const cryptoOnlyStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotCryptoOnly");
+      const blockedMarketsStored = typeof window !== "undefined" && localStorage.getItem("sentry:blockedMarkets");
       if (tp) setGlobalTakeProfitPercent(Math.max(0, parseFloat(tp)));
       if (sl) setGlobalStopLossPercent(Math.max(0, parseFloat(sl)));
       if (minLiveQty) setLiveMinOrderQty(Math.max(0.0001, parseFloat(minLiveQty)));
       if (minLiveCryptoQty) setLiveMinCryptoOrderQty(Math.max(0.000001, parseFloat(minLiveCryptoQty)));
+      if (maxConcurrentStored) setMaxConcurrentPositions(Math.max(1, parseInt(maxConcurrentStored)));
+      if (maxConcurrentCryptoStored) setMaxConcurrentCryptoPositions(Math.max(1, parseInt(maxConcurrentCryptoStored)));
+      const autoLiquidateStored = typeof window !== "undefined" && localStorage.getItem("sentry:autoLiquidateBeforeClose");
+      const liquidationMinStored = typeof window !== "undefined" && localStorage.getItem("sentry:liquidationBeforeCloseMin");
+      if (autoLiquidateStored) setAutoLiquidateBeforeClose(autoLiquidateStored === "true");
+      if (liquidationMinStored) setLiquidationBeforeCloseMin(Math.max(1, parseInt(liquidationMinStored)));
       if (broadScan) setAutopilotScanBroadUniverse(broadScan === "true");
+      if (cryptoOnlyStored) setAutopilotCryptoOnly(cryptoOnlyStored === "true");
+      if (blockedMarketsStored) {
+        try { setBlockedMarkets(JSON.parse(blockedMarketsStored)); } catch (e) {}
+      }
     } catch (e) {
       // ignore
     }
@@ -518,15 +540,20 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:minAvgVol", String(minAvgVolume));
         localStorage.setItem("sentry:maxExposurePct", String(maxExposurePercentPerSymbol));
         localStorage.setItem("sentry:maxConcurrent", String(maxConcurrentPositions));
+        localStorage.setItem("sentry:maxConcurrentCrypto", String(maxConcurrentCryptoPositions));
         localStorage.setItem("sentry:liveMinQty", String(liveMinOrderQty));
         localStorage.setItem("sentry:liveMinCryptoQty", String(liveMinCryptoOrderQty));
+        localStorage.setItem("sentry:autoLiquidateBeforeClose", String(autoLiquidateBeforeClose));
+        localStorage.setItem("sentry:liquidationBeforeCloseMin", String(liquidationBeforeCloseMin));
         localStorage.setItem("sentry:aggressiveDeleverage", JSON.stringify(aggressiveDeleverage));
         localStorage.setItem("sentry:scanBroadUniverse", String(autopilotScanBroadUniverse));
+        localStorage.setItem("sentry:autopilotCryptoOnly", String(autopilotCryptoOnly));
+        localStorage.setItem("sentry:blockedMarkets", JSON.stringify(blockedMarkets));
         localStorage.setItem("sentry:allowLiveShorts", String(allowLiveShorts));
         localStorage.setItem("sentry:positionsView", positionsView);
       }
     } catch (e) {}
-  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse]);
+  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse]);
 
   useEffect(() => {
     try {
@@ -682,6 +709,7 @@ export default function MarketTerminal() {
   const autopilotPendingBuyMetaRef = useRef<Record<string, { baseQty: number; submittedQty: number; submittedAt: number }>>({});
   const autopilotLossGuardBlockedUntilRef = useRef<Record<string, number>>({});
   const autopilotBuyCooldownUntilRef = useRef<Record<string, number>>({});
+  const lastAutoLiquidationDayRef = useRef<string | null>(null);
   const orderMutexRef = useRef<AsyncMutex>(new AsyncMutex());
   const autopilotTargetSymbolIndexRef = useRef(0);
   const LIQUIDATION_COOLDOWN_MS = 30 * 60 * 1000;
@@ -707,6 +735,24 @@ export default function MarketTerminal() {
     }
     if (qty > 0) return cur < avg;
     if (qty < 0) return cur > avg;
+    return false;
+  }, []);
+
+  const computeOpenCounts = useCallback((positions: any[]) => {
+    const all = (positions || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
+    const crypto = (positions || []).filter((p: any) => {
+      try { return parseFloat(p.qty || 0) > 0 && isCryptoSymbol(String(p.symbol || "")); } catch (e) { return false; }
+    }).length;
+    return { all, crypto };
+  }, []);
+
+  const isCryptoSymbol = useCallback((s: string) => {
+    if (!s) return false;
+    const u = String(s).toUpperCase().trim();
+    // treat obvious pairs and suffixes; avoid broad substring matches
+    if (u.endsWith("USD") || u.endsWith("USDT")) return true;
+    const explicit = ["BTCUSD","ETHUSD","BTCUSDT","ETHUSDT","LTCUSD","XRPUSD","DOGEUSD","ETHBTC","BTCETH"];
+    if (explicit.includes(u)) return true;
     return false;
   }, []);
 
@@ -911,8 +957,11 @@ export default function MarketTerminal() {
       minAvgVolume,
       maxExposurePercentPerSymbol,
       maxConcurrentPositions,
+      maxConcurrentCryptoPositions,
       liveMinOrderQty,
-      liveMinCryptoOrderQty
+      liveMinCryptoOrderQty,
+      autopilotCryptoOnly,
+      blockedMarkets,
     };
   }, [
     useAlpacaLive,
@@ -945,9 +994,12 @@ export default function MarketTerminal() {
     minAvgVolume,
     maxExposurePercentPerSymbol,
     maxConcurrentPositions,
+    maxConcurrentCryptoPositions,
     autopilotBlacklist,
     liveMinOrderQty,
-    liveMinCryptoOrderQty
+    liveMinCryptoOrderQty,
+    autopilotCryptoOnly,
+    blockedMarkets,
   ]);
 
   // (moved) addAutopilotLog is hoisted above to avoid TDZ issues
@@ -967,13 +1019,7 @@ export default function MarketTerminal() {
     }
     symbolClean = symbolClean.toUpperCase().trim();
 
-    const isCryptoSymbol = (s: string) => {
-      if (!s) return false;
-      const u = s.toUpperCase();
-      if (u.endsWith("USD") || u.endsWith("USDT") || u.includes("BTC") || u.includes("ETH")) return true;
-      const cryptoPairs = ["BTCUSD","ETHUSD","BTCUSDT","ETHUSDT","LTCUSD","XRPUSD","DOGEUSD"];
-      return cryptoPairs.includes(u);
-    };
+    
 
     if (side === "BUY") {
       const cooldownUntil = autopilotBuyCooldownUntilRef.current[symbolClean] || 0;
@@ -990,6 +1036,32 @@ export default function MarketTerminal() {
         };
       }
     }
+
+    // Market-block / crypto-only enforcement
+    try {
+      const curBlocked = curRef.blockedMarkets || { wallStreet: false, india: false, crypto: false };
+      const isCrypto = isCryptoSymbol(symbolClean);
+      const isIndia = symbolClean.endsWith('.NS') || symbolClean.endsWith('.BO') || curRef.brokerType === 'ANGELONE';
+      const isWallStreet = !isCrypto && !isIndia;
+      if (curRef.autopilotCryptoOnly && side === 'BUY' && !isCrypto) {
+        addAutopilotLog(`Blocked BUY ${symbolClean}: autopilot configured for crypto-only trading.`, 'warn');
+        return { status: 'BLOCKED', code: 'BLOCKED_CRYPTO_ONLY', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Autopilot set to crypto-only.' };
+      }
+      if (side === 'BUY') {
+        if (curBlocked.crypto && isCrypto) {
+          addAutopilotLog(`Blocked BUY ${symbolClean}: crypto trading is disabled by market block.`, 'warn');
+          return { status: 'BLOCKED', code: 'BLOCKED_CRYPTO_ONLY', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Crypto trading disabled.' };
+        }
+        if (curBlocked.india && isIndia) {
+          addAutopilotLog(`Blocked BUY ${symbolClean}: India market trading is disabled.`, 'warn');
+          return { status: 'BLOCKED', code: 'BLOCKED_CRYPTO_ONLY', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'India market trading disabled.' };
+        }
+        if (curBlocked.wallStreet && isWallStreet) {
+          addAutopilotLog(`Blocked BUY ${symbolClean}: Wall Street trading is disabled.`, 'warn');
+          return { status: 'BLOCKED', code: 'BLOCKED_CRYPTO_ONLY', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Wall Street trading disabled.' };
+        }
+      }
+    } catch (e) { /* ignore */ }
 
     const activePositionsForCloseCheck = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
     const existingPositionBeforeOrder = activePositionsForCloseCheck.find((p: any) => p.symbol === symbolClean);
@@ -1043,16 +1115,23 @@ export default function MarketTerminal() {
     }
 
     // Portfolio risk screening: exposure caps and concurrent positions
-    try {
+      try {
       // Early concurrency pre-check: consider already-pending autopilot buys
       try {
         const _activeEarly = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
-        const _openCountEarly = (_activeEarly || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
+        const _countsEarly = computeOpenCounts(_activeEarly);
+        const _openCountEarlyAll = _countsEarly.all;
+        const _openCountEarlyCrypto = _countsEarly.crypto;
         const _existingLongEarly = _activeEarly.find((p: any) => p.symbol === symbolClean && parseFloat(p.qty || 0) > 0);
-        const _pendingCount = autopilotPendingBuySymbolsRef.current.size;
-        if (side === "BUY" && !_existingLongEarly && _openCountEarly + _pendingCount >= (curRef.maxConcurrentPositions || 999)) {
-          addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${curRef.maxConcurrentPositions}) reached (open ${_openCountEarly} + pending ${_pendingCount}).`, "warn");
-          addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: concurrent positions limit reached (open ${_openCountEarly} + pending ${_pendingCount}).`, "WARNING");
+        const pendingSymbolsArr = Array.from(autopilotPendingBuySymbolsRef.current || []);
+        const _isCryptoEarly = isCryptoSymbol(symbolClean);
+        const _pendingCount = _isCryptoEarly ? pendingSymbolsArr.filter(s => isCryptoSymbol(s)).length : pendingSymbolsArr.filter(s => !isCryptoSymbol(s)).length;
+        const _limitEarly = _isCryptoEarly ? (curRef.maxConcurrentCryptoPositions || curRef.maxConcurrentPositions || 999) : (curRef.maxConcurrentPositions || 999);
+        const _openRelevantEarly = _isCryptoEarly ? _openCountEarlyCrypto : _openCountEarlyAll;
+        if (side === "BUY" && !_existingLongEarly && _openRelevantEarly + _pendingCount >= _limitEarly) {
+          console.warn(`Autopilot concurrency block for ${symbolClean}: openRelevantEarly=${_openRelevantEarly}, pending=${_pendingCount}, limit=${_limitEarly}, openAll=${_openCountEarlyAll}, openCrypto=${_openCountEarlyCrypto}`);
+          addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${_limitEarly}) reached (open ${_openRelevantEarly} + pending ${_pendingCount}).`, "warn");
+          addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: concurrent positions limit reached (open ${_openRelevantEarly} + pending ${_pendingCount}).`, "WARNING");
           return {
             status: "BLOCKED",
             code: "BLOCKED_MAX_CONCURRENT",
@@ -1060,7 +1139,7 @@ export default function MarketTerminal() {
             side,
             requestedQty: qtyNum,
             executedQty: 0,
-            message: `Concurrent position limit (${curRef.maxConcurrentPositions}) reached.`
+            message: `Concurrent position limit (${_limitEarly}) reached.`
           };
         }
       } catch (e) {
@@ -1071,11 +1150,17 @@ export default function MarketTerminal() {
       const cashValue = curRef.useAlpacaLive ? parseFloat(curRef.alpacaAccount?.cash || "0") : (parseFloat(curRef.simCash as any) || 0);
       const totalPortfolio = Math.max(1, totalPosValue + cashValue);
 
-      const openCount = (activePositions || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
+      const counts = computeOpenCounts(activePositions || []);
+      const openCountAll = counts.all;
+      const openCountCrypto = counts.crypto;
       const existingLong = activePositions.find((p: any) => p.symbol === symbolClean && parseFloat(p.qty || 0) > 0);
       // Allow adding to an already-open symbol even when the concurrent-position ceiling is reached.
-      if (side === "BUY" && !existingLong && openCount >= (curRef.maxConcurrentPositions || 999)) {
-        addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${curRef.maxConcurrentPositions}) reached.`, "warn");
+      const isCrypto = isCryptoSymbol(symbolClean);
+      const limit = isCrypto ? (curRef.maxConcurrentCryptoPositions || curRef.maxConcurrentPositions || 999) : (curRef.maxConcurrentPositions || 999);
+      const openRelevant = isCrypto ? openCountCrypto : openCountAll;
+      if (side === "BUY" && !existingLong && openRelevant >= limit) {
+        console.warn(`Autopilot concurrency block for ${symbolClean}: openRelevant=${openRelevant}, limit=${limit}, openAll=${openCountAll}, openCrypto=${openCountCrypto}`);
+        addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${limit}) reached (open ${openRelevant} total / crypto ${openCountCrypto}).`, "warn");
         addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: concurrent positions limit reached.`, "WARNING");
         return {
           status: "BLOCKED",
@@ -1084,7 +1169,7 @@ export default function MarketTerminal() {
           side,
           requestedQty: qtyNum,
           executedQty: 0,
-          message: `Concurrent position limit (${curRef.maxConcurrentPositions}) reached.`
+          message: `Concurrent position limit (${limit}) reached.`
         };
       }
 
@@ -3330,6 +3415,8 @@ export default function MarketTerminal() {
   const totalEquity = activeCash + totalMarketValue;
   const netProfit = useAlpacaLive ? 0 : totalEquity - startingCapital;
   const roiPercent = useAlpacaLive ? 0 : (startingCapital > 0 ? (netProfit / startingCapital) * 100 : 0);
+  // Percent of cash used by portfolio: positions value / (cash + positions)
+  const percentCashUsed = totalEquity > 0 ? (totalMarketValue / totalEquity) * 100 : 0;
   
   // Real-time sum of open positions' unrealized P&L
   const totalOpenPL = activePositions.reduce(
@@ -3369,6 +3456,53 @@ export default function MarketTerminal() {
     marginRiskStatus = "WARNING";
   }
 
+  // Auto-liquidation: sell non-crypto positions a configurable minutes before market close
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let timer: any = null;
+    const checkAndLiquidate = async () => {
+      const curRef = stateRef.current;
+      if (!curRef.useAlpacaLive) return; // only run in live mode
+      if (!autoLiquidateBeforeClose) return;
+      // compute ET time
+      const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+      const day = et.getDay();
+      if (day === 0 || day === 6) return; // weekend
+      const minsNow = et.getHours() * 60 + et.getMinutes();
+      const marketCloseMins = 16 * 60; // 16:00 ET
+      const minsToClose = marketCloseMins - minsNow;
+      const todayKey = et.toISOString().slice(0,10);
+      if (minsToClose <= liquidationBeforeCloseMin && minsToClose >= 0) {
+        if (lastAutoLiquidationDayRef.current === todayKey) return; // already ran today
+        lastAutoLiquidationDayRef.current = todayKey;
+        // collect non-crypto open positions
+        const activePositions = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
+        const toClose = (activePositions || []).filter((p: any) => {
+          try {
+            return parseFloat(p.qty || 0) > 0 && !isCryptoSymbol(String(p.symbol || ''));
+          } catch (e) { return false; }
+        });
+        if ((toClose || []).length === 0) return;
+        addLog('SENTRY', 'AUTO_LIQUIDATE', `Auto-liquidation triggered: closing ${toClose.length} non-crypto positions ${liquidationBeforeCloseMin}m before market close.`, 'WARNING');
+        addAutopilotLog(`🚨 Auto-liquidation: closing ${toClose.length} non-crypto positions now to avoid overnight equity exposure.`, 'warn');
+        for (const pos of toClose) {
+          try {
+            const qty = Math.abs(parseFloat(pos.qty || 0));
+            if (!qty || qty <= 0) continue;
+            // fire and forget; executeAutopilotOrder handles pending bookkeeping
+            executeAutopilotOrder(pos.symbol, 'SELL', qty).catch((err) => console.error('auto-liquidate failed', err));
+          } catch (e) {
+            console.error('auto-liquidate error', e);
+          }
+        }
+      }
+    };
+    // run immediately and then every 30s
+    checkAndLiquidate();
+    timer = setInterval(checkAndLiquidate, 30000);
+    return () => { if (timer) clearInterval(timer); };
+  }, [autoLiquidateBeforeClose, liquidationBeforeCloseMin, executeAutopilotOrder, addLog, addAutopilotLog]);
+
   // Handle Order Placement
   const handleSubmitOrder = async (side: "BUY" | "SELL") => {
     const inputVal = parseFloat(orderQty);
@@ -3387,15 +3521,7 @@ export default function MarketTerminal() {
     setOrderSuccess("");
     setIsPlacingOrder(true);
 
-    const isCryptoSymbol = (s: string) => {
-      if (!s) return false;
-      const u = s.toUpperCase();
-      // common crypto tickers suffixes
-      if (u.endsWith("USD") || u.endsWith("USDT") || u.endsWith("BTC") || u.endsWith("ETH") || u.includes("BTC") || u.includes("ETH")) return true;
-      // explicit common pairs
-      const cryptoPairs = ["BTCUSD","ETHUSD","BTCUSDT","ETHUSDT","LTCUSD","XRPUSD","DOGEUSD"];
-      return cryptoPairs.includes(u);
-    };
+    
 
     let estPrice = 150.0;
     const matchedTicker = useAlpacaLive 
@@ -5008,6 +5134,19 @@ if __name__ == "__main__":
             )}
           </div>
 
+          <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-cash-used">
+            <Percent className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
+            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono">
+              Portfolio Cash Used
+            </span>
+            <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono break-all" id="cash-used-number">
+              {percentCashUsed.toFixed(2)}%
+            </div>
+            <div className="text-xs text-gray-400 mt-1.5 font-mono">
+              {`Positions ${totalMarketValue.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})} / Equity ${totalEquity.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`}
+            </div>
+          </div>
+
           <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden col-span-2 lg:col-span-1" id="stat-buying-power">
             <Zap className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
             <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono">
@@ -5917,7 +6056,7 @@ if __name__ == "__main__":
                   </div>
 
                   {/* Risk & diversification controls */}
-                  <div className="grid grid-cols-3 gap-3 pt-3" id="risk-diversify-row">
+                  <div className="grid grid-cols-4 gap-3 pt-3" id="risk-diversify-row">
                     <div>
                       <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Min Avg Volume</label>
                       <input
@@ -5976,6 +6115,51 @@ if __name__ == "__main__":
                         className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
                       />
                       <p className="text-[9px] text-gray-500 mt-1">Limit concurrent open positions to reduce concentration.</p>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Max Concurrent Crypto</label>
+                      <input
+                        id="max-concurrent-crypto-input"
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={maxConcurrentCryptoPositions}
+                        onChange={(e) => setMaxConcurrentCryptoPositions(Number.isFinite(parseFloat(e.target.value)) ? Math.max(1, parseInt(e.target.value)) : 1)}
+                        className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                      />
+                      <p className="text-[9px] text-gray-500 mt-1">Limit concurrent open crypto positions separately.</p>
+                    </div>
+                    <div className="col-span-4 pt-3">
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Market Blocks / Crypto-Only</label>
+                      <div className="flex flex-col gap-2">
+                        <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={autopilotCryptoOnly} onChange={(e) => setAutopilotCryptoOnly(e.target.checked)} />Autopilot: Crypto-only buys</label>
+                        <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.wallStreet} onChange={(e) => setBlockedMarkets((s) => ({...s, wallStreet: e.target.checked}))} />Block Wall Street (NYSE/NASDAQ)</label>
+                        <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.india} onChange={(e) => setBlockedMarkets((s) => ({...s, india: e.target.checked}))} />Block India (NSE/BSE)</label>
+                        <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.crypto} onChange={(e) => setBlockedMarkets((s) => ({...s, crypto: e.target.checked}))} />Block Crypto</label>
+                      </div>
+                      <p className="text-[9px] text-gray-500 mt-1">Use these to prevent autopilot from opening new BUYs on the selected markets.</p>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Auto Liquidate Before Close</label>
+                      <div className="flex gap-2">
+                        <input
+                          id="auto-liquidate-toggle"
+                          type="checkbox"
+                          checked={autoLiquidateBeforeClose}
+                          onChange={(e) => setAutoLiquidateBeforeClose(e.target.checked)}
+                          className="h-4 w-4 cursor-pointer"
+                        />
+                        <input
+                          id="liquidation-mins-input"
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={liquidationBeforeCloseMin}
+                          onChange={(e) => setLiquidationBeforeCloseMin(Number.isFinite(parseFloat(e.target.value)) ? Math.max(1, parseInt(e.target.value)) : 5)}
+                          className="w-20 bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                        />
+                      </div>
+                      <p className="text-[9px] text-gray-500 mt-1">When enabled, sell non-crypto positions this many minutes before market close.</p>
                     </div>
                   </div>
 
