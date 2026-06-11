@@ -656,6 +656,24 @@ export default function MarketTerminal() {
   const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
   const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("manual");
   const [isTickStreamActive, setIsTickStreamActive] = useState(true);
+  // Derived counts
+  const coinCount = useMemo(() => {
+    const positions = useAlpacaLive ? (alpacaPositions || []) : (mockPositions || []);
+    const seen = new Set<string>();
+    for (const p of positions) {
+      try {
+        const s = String(p?.symbol || "").toUpperCase().trim();
+        if (!s) continue;
+        // treat crypto by suffix or known pairs
+        if (s.endsWith("USD") || s.endsWith("USDT") || s.includes("BTC") || s.includes("ETH")) {
+          seen.add(s);
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    return seen.size;
+  }, [useAlpacaLive, alpacaPositions, mockPositions]);
   const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
   const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
   const prevAutopilotActiveRef = useRef<boolean | null>(null);
@@ -948,6 +966,14 @@ export default function MarketTerminal() {
       };
     }
     symbolClean = symbolClean.toUpperCase().trim();
+
+    const isCryptoSymbol = (s: string) => {
+      if (!s) return false;
+      const u = s.toUpperCase();
+      if (u.endsWith("USD") || u.endsWith("USDT") || u.includes("BTC") || u.includes("ETH")) return true;
+      const cryptoPairs = ["BTCUSD","ETHUSD","BTCUSDT","ETHUSDT","LTCUSD","XRPUSD","DOGEUSD"];
+      return cryptoPairs.includes(u);
+    };
 
     if (side === "BUY") {
       const cooldownUntil = autopilotBuyCooldownUntilRef.current[symbolClean] || 0;
@@ -1319,7 +1345,14 @@ export default function MarketTerminal() {
       const release = await orderMutexRef.current.acquire();
       try {
         let response;
-        if (curRef.brokerType === "ANGELONE") {
+        // If this is a crypto symbol, route to Gemini proxy for live execution
+        if (isCryptoSymbol(symbolClean)) {
+          response = await fetch("/api/gemini/trade", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ symbol: symbolClean, side, type: "MARKET", quantity: finalQty, isLive: true, openShort: side === "SELL" }),
+          });
+        } else if (curRef.brokerType === "ANGELONE") {
           response = await fetch("/api/angelone/trade", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -3354,6 +3387,16 @@ export default function MarketTerminal() {
     setOrderSuccess("");
     setIsPlacingOrder(true);
 
+    const isCryptoSymbol = (s: string) => {
+      if (!s) return false;
+      const u = s.toUpperCase();
+      // common crypto tickers suffixes
+      if (u.endsWith("USD") || u.endsWith("USDT") || u.endsWith("BTC") || u.endsWith("ETH") || u.includes("BTC") || u.includes("ETH")) return true;
+      // explicit common pairs
+      const cryptoPairs = ["BTCUSD","ETHUSD","BTCUSDT","ETHUSDT","LTCUSD","XRPUSD","DOGEUSD"];
+      return cryptoPairs.includes(u);
+    };
+
     let estPrice = 150.0;
     const matchedTicker = useAlpacaLive 
       ? alpacaPositions?.find((p) => p.symbol === symbolClean)
@@ -3379,7 +3422,142 @@ export default function MarketTerminal() {
         return;
       }
 
+      // Centralized routing: if this is a crypto symbol, route to Gemini proxy for live execution
+      const isCrypto = isCryptoSymbol(symbolClean);
+      if (isCrypto) {
+        const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
+        const ownedQty = existingPos ? existingPos.qty : 0;
+        const attemptingOpenShort = side === "SELL" && (ownedQty <= 0 || qtyNum > ownedQty);
+        if (attemptingOpenShort && !allowLiveShorts) {
+          setIsPlacingOrder(false);
+          setOrderError(`Live short-selling for crypto is blocked by local policy. Enable 'Allow Live Shorts' to proceed or use the simulator.`);
+          addLog(symbolClean, "SELL_BLOCKED_SHORTS", "Blocked live crypto short attempt — enable Allow Live Shorts to override.", "WARNING");
+          return;
+        }
+
+        addLog("GEMINI", side, `Transmitting Crypto Order to Gemini: ${side} ${qtyNum} ${symbolClean} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
+        try {
+          const payload: any = {
+            symbol: symbolClean,
+            side: side,
+            type: "MARKET",
+            quantity: parseFloat(qtyNum.toFixed(6)),
+            isLive: true,
+            openShort: attemptingOpenShort && allowLiveShorts,
+          };
+
+          const response = await fetch("/api/gemini/trade", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+
+          const resText = await response.text();
+          let dataOrder: any = null;
+          try {
+            dataOrder = JSON.parse(resText);
+          } catch (e) {
+            throw new Error(`Server returned error output: ${resText.slice(0, 120).trim()}...`);
+          }
+
+          if (!response.ok || dataOrder?.error) {
+            throw new Error(dataOrder?.error || "Order rejected by Binance proxy server.");
+          }
+
+          setOrderSuccess(`Binance order accepted: ${dataOrder.order?.clientOrderId || dataOrder.order?.orderId || 'submitted'}`);
+          addLog(symbolClean, `${side}_FILLED`, `Binance crypto order executed for ${qtyNum} ${symbolClean}.`, "SUCCESS");
+
+          const newOrderObj: Order = {
+            id: dataOrder.order?.clientOrderId || dataOrder.order?.orderId || `bin-${Date.now()}`,
+            symbol: symbolClean,
+            side: side,
+            qty: qtyNum,
+            price: dataOrder.order?.price || dataOrder.order?.avgPrice || estPrice,
+            status: dataOrder.order?.status?.toUpperCase() || "ACCEPTED",
+            submittedAt: new Date().toLocaleTimeString(),
+          };
+          setOrders((prev) => [newOrderObj, ...prev]);
+          setTimeout(() => handleRefreshData(), 1200);
+        } catch (err: any) {
+          console.error(err);
+          setOrderError(err.message || "Failed Binance order.");
+          addLog(symbolClean, `${side}_REJECTED`, err.message || "Binance execution failed.", "CRITICAL");
+        } finally {
+          setIsPlacingOrder(false);
+        }
+
+        return;
+      }
+
       if (brokerType === "ANGELONE") {
+        // Route crypto symbols to Binance (live) instead of Alpaca when appropriate
+        const isCrypto = isCryptoSymbol(symbolClean);
+        if (isCrypto) {
+          // Shorting gating: opening a short (selling without owning) requires explicit allowLiveShorts
+          const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
+          const ownedQty = existingPos ? existingPos.qty : 0;
+          const attemptingOpenShort = side === "SELL" && (ownedQty <= 0 || qtyNum > ownedQty);
+          if (attemptingOpenShort && !allowLiveShorts) {
+            setIsPlacingOrder(false);
+            setOrderError(`Live short-selling for crypto is blocked by local policy. Enable 'Allow Live Shorts' to proceed or use the simulator.`);
+            addLog(symbolClean, "SELL_BLOCKED_SHORTS", "Blocked live crypto short attempt — enable Allow Live Shorts to override.", "WARNING");
+            return;
+          }
+
+          addLog("BINANCE", side, `Transmitting Crypto Order to Binance: ${side} ${qtyNum} ${symbolClean} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
+          try {
+            const payload: any = {
+              symbol: symbolClean,
+              side: side,
+              type: "MARKET",
+              quantity: parseFloat(qtyNum.toFixed(6)),
+              isLive: true,
+              openShort: attemptingOpenShort && allowLiveShorts,
+            };
+
+            const response = await fetch("/api/binance/trade", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+
+            const resText = await response.text();
+            let dataOrder: any = null;
+            try {
+              dataOrder = JSON.parse(resText);
+            } catch (e) {
+              throw new Error(`Server returned error output: ${resText.slice(0, 120).trim()}...`);
+            }
+
+            if (!response.ok || dataOrder?.error) {
+              throw new Error(dataOrder?.error || "Order rejected by Gemini proxy server.");
+            }
+
+            setOrderSuccess(`Gemini order accepted: ${dataOrder.order?.clientOrderId || dataOrder.order?.orderId || 'submitted'}`);
+            addLog(symbolClean, `${side}_FILLED`, `Binance crypto order executed for ${qtyNum} ${symbolClean}.`, "SUCCESS");
+
+            const newOrderObj: Order = {
+              id: dataOrder.order?.clientOrderId || dataOrder.order?.orderId || `bin-${Date.now()}`,
+              symbol: symbolClean,
+              side: side,
+              qty: qtyNum,
+              price: dataOrder.order?.price || dataOrder.order?.avgPrice || estPrice,
+              status: dataOrder.order?.status?.toUpperCase() || "ACCEPTED",
+              submittedAt: new Date().toLocaleTimeString(),
+            };
+            setOrders((prev) => [newOrderObj, ...prev]);
+            setTimeout(() => handleRefreshData(), 1200);
+          } catch (err: any) {
+            console.error(err);
+            setOrderError(err.message || "Failed Binance order.");
+            addLog(symbolClean, `${side}_REJECTED`, err.message || "Binance execution failed.", "CRITICAL");
+          } finally {
+            setIsPlacingOrder(false);
+          }
+
+          return;
+        }
+
         if (side === "SELL") {
           const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
           const ownedQty = existingPos ? existingPos.qty : 0;
@@ -4696,6 +4874,18 @@ if __name__ == "__main__":
                 </div>
               </>
             )}
+          </div>
+
+          {/* DEDICATED CARD: Crypto Holdings Count */}
+          <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-crypto-count">
+            <svg className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2v20M2 12h20" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono text-yellow-300">
+              Crypto Holdings
+            </span>
+            <div className={`text-2xl sm:text-3xl font-extrabold font-mono break-all text-white`} id="crypto-holdings-count">
+              {coinCount}
+            </div>
+            <div className="text-xs mt-1.5 font-mono text-gray-400">Distinct coins/pairs held</div>
           </div>
 
           {/* DEDICATED CARD: Open Positions P&L (Active Trades) */}
