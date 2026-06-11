@@ -283,6 +283,7 @@ export default function MarketTerminal() {
   const [isPaper, setIsPaper] = useState(true);
   const [useAlpacaLive, setUseAlpacaLive] = useState(false);
   const [allowLiveShorts, setAllowLiveShorts] = useState(false);
+  const [positionsView, setPositionsView] = useState<'ALL' | 'LONGS' | 'SHORTS'>('ALL');
 
   // Angel One (SmartAPI Indian Market) Configuration
   const [angelApiKey, setAngelApiKey] = useState("");
@@ -522,6 +523,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:aggressiveDeleverage", JSON.stringify(aggressiveDeleverage));
         localStorage.setItem("sentry:scanBroadUniverse", String(autopilotScanBroadUniverse));
         localStorage.setItem("sentry:allowLiveShorts", String(allowLiveShorts));
+        localStorage.setItem("sentry:positionsView", positionsView);
       }
     } catch (e) {}
   }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse]);
@@ -537,6 +539,13 @@ export default function MarketTerminal() {
     try {
       const raw = typeof window !== "undefined" && localStorage.getItem("sentry:allowLiveShorts");
       if (raw) setAllowLiveShorts(raw === "true");
+    } catch (e) {}
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = typeof window !== "undefined" && localStorage.getItem("sentry:positionsView");
+      if (raw && (raw === 'ALL' || raw === 'LONGS' || raw === 'SHORTS')) setPositionsView(raw as any);
     } catch (e) {}
   }, []);
 
@@ -818,6 +827,7 @@ export default function MarketTerminal() {
   const stateRef = React.useRef<any>({
     useAlpacaLive,
     allowLiveShorts,
+    positionsView,
     alpacaPositions,
     mockPositions,
     simCash,
@@ -853,6 +863,7 @@ export default function MarketTerminal() {
     stateRef.current = {
       useAlpacaLive,
       allowLiveShorts,
+      positionsView,
       alpacaPositions,
       mockPositions,
       simCash,
@@ -5127,10 +5138,16 @@ if __name__ == "__main__":
                 </div>
               )}
 
-              {activePositions.length > 0 && (
+              {(() => {
+                const filteredPositions = activePositions.filter((p) => {
+                  if (positionsView === 'ALL') return true;
+                  if (positionsView === 'LONGS') return (p.qty || 0) > 0;
+                  return (p.qty || 0) < 0;
+                });
+                return filteredPositions.length > 0 && (
                 <button
                   id="liquidate-portfolio-button"
-                  onClick={openConfirmForPortfolio}
+                    onClick={openConfirmForPortfolio}
                   disabled={isLiquidating === "all"}
                   className="p-2 bg-red-950/80 hover:bg-red-900 border border-red-905 border-red-900/40 text-red-100 hover:text-white rounded-lg flex items-center gap-1.5 text-xs transition font-semibold"
                   title="Liquidate your entire portfolio immediately"
@@ -5138,11 +5155,29 @@ if __name__ == "__main__":
                   <XOctagon className={`h-3.5 w-3.5 ${isLiquidating === "all" ? "animate-spin" : ""}`} />
                   <span>Liquidate Portfolio</span>
                 </button>
-              )}
+                );
+              })()}
             </div>
           </div>
 
           {/* Active Positions Table */}
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => { setPositionsView('ALL'); try { if (typeof window !== 'undefined') localStorage.setItem('sentry:positionsView','ALL'); } catch(e){} }}
+                className={`px-3 py-1 rounded ${positionsView === 'ALL' ? 'bg-brand-green text-black font-bold' : 'bg-transparent text-gray-400 border border-brand-border/30'}`}
+              >All</button>
+              <button
+                onClick={() => { setPositionsView('LONGS'); try { if (typeof window !== 'undefined') localStorage.setItem('sentry:positionsView','LONGS'); } catch(e){} }}
+                className={`px-3 py-1 rounded ${positionsView === 'LONGS' ? 'bg-brand-green text-black font-bold' : 'bg-transparent text-gray-400 border border-brand-border/30'}`}
+              >Longs</button>
+              <button
+                onClick={() => { setPositionsView('SHORTS'); try { if (typeof window !== 'undefined') localStorage.setItem('sentry:positionsView','SHORTS'); } catch(e){} }}
+                className={`px-3 py-1 rounded ${positionsView === 'SHORTS' ? 'bg-brand-red text-black font-bold' : 'bg-transparent text-gray-400 border border-brand-border/30'}`}
+              >Shorts</button>
+            </div>
+            <div className="text-xs text-gray-400">Showing: {positionsView}</div>
+          </div>
           <div className="overflow-x-auto" id="positions-table-overflow">
             <table className="w-full text-left border-collapse" id="positions-table">
               <thead>
@@ -5158,8 +5193,15 @@ if __name__ == "__main__":
                 </tr>
               </thead>
               <tbody className="divide-y divide-brand-border/40 text-sm font-mono" id="positions-table-body">
-                {activePositions.length > 0 ? (
-                  activePositions.map((pos) => {
+                {(() => {
+                  const filteredPositions = activePositions.filter((p) => {
+                    if (positionsView === 'ALL') return true;
+                    if (positionsView === 'LONGS') return (p.qty || 0) > 0;
+                    return (p.qty || 0) < 0;
+                  });
+
+                  return filteredPositions.length > 0 ? (
+                    filteredPositions.map((pos) => {
                     const plVal = pos.unrealized_pl !== undefined ? pos.unrealized_pl : (pos.current_price - pos.avg_entry_price) * pos.qty;
                     const isPlPositive = plVal >= 0;
 
@@ -5247,19 +5289,20 @@ if __name__ == "__main__":
                       </tr>
                     );
                   })
-                ) : (
-                  <tr id="empty-table-prompt">
-                    <td colSpan={8} className="py-12 text-center text-gray-500">
-                      <div className="flex flex-col items-center justify-center">
-                        <DollarSign className="h-10 w-10 text-brand-border/80 mb-2" />
-                        <p className="text-sm font-semibold">Workspace Collateral is Empty</p>
-                        <p className="text-xs text-gray-505 text-gray-500 max-w-sm mt-1">
-                          No active positions found in {useAlpacaLive ? "this Alpaca account portfolio" : "simulator mode"}. Submit buy orders on the terminal right side to construct asset balance.
-                        </p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
+                  ) : (
+                    <tr id="empty-table-prompt">
+                      <td colSpan={8} className="py-12 text-center text-gray-500">
+                        <div className="flex flex-col items-center justify-center">
+                          <DollarSign className="h-10 w-10 text-brand-border/80 mb-2" />
+                          <p className="text-sm font-semibold">No positions match the current view</p>
+                          <p className="text-xs text-gray-505 text-gray-500 max-w-sm mt-1">
+                            No active positions found for view {positionsView} in {useAlpacaLive ? "this Alpaca account portfolio" : "simulator mode"}. Switch view or submit orders on the terminal to populate positions.
+                          </p>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })()}
               </tbody>
             </table>
           </div>
