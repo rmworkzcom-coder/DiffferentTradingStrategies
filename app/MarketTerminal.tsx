@@ -196,9 +196,52 @@ function PositionSparkline({ symbol, currentPl, totalCost }: { symbol: string; c
   );
 }
 
+// Simple async mutex to serialize critical autopilot order paths and avoid race conditions
+class AsyncMutex {
+  private _locked = false;
+  private _queue: Array<() => void> = [];
+
+  async acquire(): Promise<() => void> {
+    return new Promise<() => void>((resolve) => {
+      const ticket = () => {
+        this._locked = true;
+        const release = () => {
+          this._locked = false;
+          const next = this._queue.shift();
+          if (next) next();
+        };
+        resolve(release);
+      };
+
+      if (!this._locked) {
+        ticket();
+      } else {
+        this._queue.push(ticket);
+      }
+    });
+  }
+}
+
+function getMarketSessionET(): "OPEN" | "EXTENDED" | "CLOSED" {
+  const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const day = et.getDay();
+  if (day === 0 || day === 6) return "CLOSED";
+  const mins = et.getHours() * 60 + et.getMinutes();
+  if (mins >= 570 && mins < 960) return "OPEN";           // 9:30–16:00
+  if ((mins >= 240 && mins < 570) || (mins >= 960 && mins < 1200)) return "EXTENDED"; // 4:00–9:30, 16:00–20:00
+  return "CLOSED";
+}
+
 export default function MarketTerminal() {
   // Broker selection and credentials (Default to US Alpaca market)
   const [brokerType, setBrokerType] = useState<"ALPACA" | "ANGELONE">("ALPACA");
+
+  // Market-hours tracking
+  const [marketSession, setMarketSession] = useState<"OPEN" | "EXTENDED" | "CLOSED">(getMarketSessionET);
+  useEffect(() => {
+    const timer = setInterval(() => setMarketSession(getMarketSessionET()), 30000);
+    return () => clearInterval(timer);
+  }, []);
   
   // Toast for short-term action summaries
   const [toast, setToast] = useState<{ message: string; level?: "info" | "success" | "warn" | "error" } | null>(null);
@@ -239,6 +282,7 @@ export default function MarketTerminal() {
   const [showApiSecret, setShowApiSecret] = useState(false);
   const [isPaper, setIsPaper] = useState(true);
   const [useAlpacaLive, setUseAlpacaLive] = useState(false);
+  const [allowLiveShorts, setAllowLiveShorts] = useState(false);
 
   // Angel One (SmartAPI Indian Market) Configuration
   const [angelApiKey, setAngelApiKey] = useState("");
@@ -425,7 +469,7 @@ export default function MarketTerminal() {
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
   const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(30); // percent of portfolio per symbol
-  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(6); // concurrent open positions
+  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(10); // concurrent open positions
   const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum non-crypto live order size
   const [liveMinCryptoOrderQty, setLiveMinCryptoOrderQty] = useState<number>(0.0001); // minimum crypto live order size
   const [aggressiveDeleverage, setAggressiveDeleverage] = useState<boolean>(false);
@@ -477,6 +521,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:liveMinCryptoQty", String(liveMinCryptoOrderQty));
         localStorage.setItem("sentry:aggressiveDeleverage", JSON.stringify(aggressiveDeleverage));
         localStorage.setItem("sentry:scanBroadUniverse", String(autopilotScanBroadUniverse));
+        localStorage.setItem("sentry:allowLiveShorts", String(allowLiveShorts));
       }
     } catch (e) {}
   }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse]);
@@ -485,6 +530,13 @@ export default function MarketTerminal() {
     try {
       const raw = typeof window !== "undefined" && localStorage.getItem("sentry:aggressiveDeleverage");
       if (raw) setAggressiveDeleverage(raw === "true" || JSON.parse(raw));
+    } catch (e) {}
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = typeof window !== "undefined" && localStorage.getItem("sentry:allowLiveShorts");
+      if (raw) setAllowLiveShorts(raw === "true");
     } catch (e) {}
   }, []);
 
@@ -603,6 +655,7 @@ export default function MarketTerminal() {
   const autopilotPendingBuyMetaRef = useRef<Record<string, { baseQty: number; submittedQty: number; submittedAt: number }>>({});
   const autopilotLossGuardBlockedUntilRef = useRef<Record<string, number>>({});
   const autopilotBuyCooldownUntilRef = useRef<Record<string, number>>({});
+  const orderMutexRef = useRef<AsyncMutex>(new AsyncMutex());
   const autopilotTargetSymbolIndexRef = useRef(0);
   const LIQUIDATION_COOLDOWN_MS = 30 * 60 * 1000;
 
@@ -764,6 +817,7 @@ export default function MarketTerminal() {
   // Stable state ref to bypass interval recreate throttling
   const stateRef = React.useRef<any>({
     useAlpacaLive,
+    allowLiveShorts,
     alpacaPositions,
     mockPositions,
     simCash,
@@ -798,6 +852,7 @@ export default function MarketTerminal() {
   useEffect(() => {
     stateRef.current = {
       useAlpacaLive,
+      allowLiveShorts,
       alpacaPositions,
       mockPositions,
       simCash,
@@ -832,6 +887,7 @@ export default function MarketTerminal() {
     };
   }, [
     useAlpacaLive,
+    allowLiveShorts,
     alpacaPositions,
     mockPositions,
     simCash,
@@ -951,6 +1007,28 @@ export default function MarketTerminal() {
 
     // Portfolio risk screening: exposure caps and concurrent positions
     try {
+      // Early concurrency pre-check: consider already-pending autopilot buys
+      try {
+        const _activeEarly = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
+        const _openCountEarly = (_activeEarly || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
+        const _existingLongEarly = _activeEarly.find((p: any) => p.symbol === symbolClean && parseFloat(p.qty || 0) > 0);
+        const _pendingCount = autopilotPendingBuySymbolsRef.current.size;
+        if (side === "BUY" && !_existingLongEarly && _openCountEarly + _pendingCount >= (curRef.maxConcurrentPositions || 999)) {
+          addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${curRef.maxConcurrentPositions}) reached (open ${_openCountEarly} + pending ${_pendingCount}).`, "warn");
+          addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: concurrent positions limit reached (open ${_openCountEarly} + pending ${_pendingCount}).`, "WARNING");
+          return {
+            status: "BLOCKED",
+            code: "BLOCKED_MAX_CONCURRENT",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: 0,
+            message: `Concurrent position limit (${curRef.maxConcurrentPositions}) reached.`
+          };
+        }
+      } catch (e) {
+        // ignore pre-check errors and continue to main screening
+      }
       const activePositions = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
       const totalPosValue = (activePositions || []).reduce((s: number, p: any) => s + (parseFloat(p.market_value || p.current_price * (parseFloat(p.qty || 0) || 0)) || 0), 0);
       const cashValue = curRef.useAlpacaLive ? parseFloat(curRef.alpacaAccount?.cash || "0") : (parseFloat(curRef.simCash as any) || 0);
@@ -1050,12 +1128,6 @@ export default function MarketTerminal() {
       const matchedLiveTicker = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
       if (matchedLiveTicker) {
         liveEstimatedPrice = matchedLiveTicker.current_price;
-      } else {
-        if (symbolClean === "AAPL") liveEstimatedPrice = 182.2;
-        else if (symbolClean === "TSLA") liveEstimatedPrice = 195.0;
-        else if (symbolClean === "NVDA") liveEstimatedPrice = 115.5;
-        else if (symbolClean === "BTCUSD") liveEstimatedPrice = 67200.0;
-        else if (symbolClean === "MSFT") liveEstimatedPrice = 425.0;
       }
 
       if (curRef.brokerType === "ANGELONE") {
@@ -1100,16 +1172,35 @@ export default function MarketTerminal() {
           const existingPos = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
           const ownedQty = existingPos ? existingPos.qty : 0;
           if (ownedQty <= 0) {
-            addAutopilotLog(`Blocked automated live SmartAPI SELL of ${qtyNum} ${symbolClean}: You do not own a long position. Live Angel One short-selling is restricted.`, "warn");
-            return {
-              status: "BLOCKED",
-              code: "BLOCKED_SHORT_RESTRICTED",
-              symbol: symbolClean,
-              side,
-              requestedQty: qtyNum,
-              executedQty: 0,
-              message: "Short-selling is restricted for this live account." 
-            };
+            // Allow live shorting only if the user explicitly enabled it and account shows buying power.
+            if (!curRef.allowLiveShorts) {
+              addAutopilotLog(`Blocked automated live SmartAPI SELL of ${qtyNum} ${symbolClean}: You do not own a long position. Live Angel One short-selling is restricted.`, "warn");
+              return {
+                status: "BLOCKED",
+                code: "BLOCKED_SHORT_RESTRICTED",
+                symbol: symbolClean,
+                side,
+                requestedQty: qtyNum,
+                executedQty: 0,
+                message: "Short-selling is restricted for this live account." 
+              };
+            }
+
+            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+            if (!Number.isFinite(rawBuyingPower) || rawBuyingPower <= 0) {
+              addAutopilotLog(`Blocked live short of ${symbolClean}: account buying power looks insufficient to support margin shorting.`, "warn");
+              return {
+                status: "BLOCKED",
+                code: "BLOCKED_BUYING_POWER",
+                symbol: symbolClean,
+                side,
+                requestedQty: qtyNum,
+                executedQty: 0,
+                message: "Account buying power insufficient for live shorting."
+              };
+            }
+
+            addAutopilotLog(`Live shorting allowed by config: attempting short ${qtyNum} ${symbolClean}.`, "info");
           }
           if (finalQty > ownedQty) {
             addAutopilotLog(`Leverage Control: Capping automated live SmartAPI SELL from ${qtyNum} to owned size ${ownedQty}.`, "info");
@@ -1173,17 +1264,37 @@ export default function MarketTerminal() {
           const existingPos = curRef.alpacaPositions?.find((p: Position) => p.symbol === symbolClean);
           const ownedQty = existingPos ? existingPos.qty : 0;
           if (ownedQty <= 0) {
-            addAutopilotLog(`Blocked automated live SELL of ${qtyNum} ${symbolClean}: You do not own a long position. Live Alpaca short-selling is restricted. Switch to Local Simulator to trade short strategies!`, "warn");
-            addLog(symbolClean, "AUTO_SELL_BLOCKED", `Blocked automated short-sell of ${symbolClean}.`, "WARNING");
-            return {
-              status: "BLOCKED",
-              code: "BLOCKED_SHORT_RESTRICTED",
-              symbol: symbolClean,
-              side,
-              requestedQty: qtyNum,
-              executedQty: 0,
-              message: "Short-selling is restricted for this live account."
-            };
+            if (!curRef.allowLiveShorts) {
+              addAutopilotLog(`Blocked automated live SELL of ${qtyNum} ${symbolClean}: You do not own a long position. Live Alpaca short-selling is restricted. Switch to Local Simulator to trade short strategies!`, "warn");
+              addLog(symbolClean, "AUTO_SELL_BLOCKED", `Blocked automated short-sell of ${symbolClean}.`, "WARNING");
+              return {
+                status: "BLOCKED",
+                code: "BLOCKED_SHORT_RESTRICTED",
+                symbol: symbolClean,
+                side,
+                requestedQty: qtyNum,
+                executedQty: 0,
+                message: "Short-selling is restricted for this live account."
+              };
+            }
+
+            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+            if (!Number.isFinite(rawBuyingPower) || rawBuyingPower <= 0) {
+              addAutopilotLog(`Blocked live short of ${symbolClean}: account buying power looks insufficient to support margin shorting.`, "warn");
+              addLog(symbolClean, "AUTO_SELL_BLOCKED", `Blocked automated short-sell of ${symbolClean} due to low buying power.`, "WARNING");
+              return {
+                status: "BLOCKED",
+                code: "BLOCKED_BUYING_POWER",
+                symbol: symbolClean,
+                side,
+                requestedQty: qtyNum,
+                executedQty: 0,
+                message: "Account buying power insufficient for live shorting."
+              };
+            }
+
+            addAutopilotLog(`Live shorting allowed by config: attempting short ${qtyNum} ${symbolClean}.`, "info");
+            addLog(symbolClean, "AUTO_SELL_ALLOWED", `Live short allowed by config; proceeding to submit SELL ${qtyNum}.`, "INFO");
           }
           if (finalQty > ownedQty) {
             addAutopilotLog(`Leverage Control: Capping automated live SELL of ${symbolClean} from ${qtyNum} to owned size ${ownedQty} to prevent unauthorized short-selling.`, "info");
@@ -1194,6 +1305,7 @@ export default function MarketTerminal() {
 
       addAutopilotLog(`[Bot Order] Queueing live brokerage market ${side} of ${finalQty} ${symbolClean}...`, "trade");
       addLog("AUTOPILOT", side, `Transmitting Bot Order: ${side} ${finalQty} shares of ${symbolClean}`, "INFO");
+      const release = await orderMutexRef.current.acquire();
       try {
         let response;
         if (curRef.brokerType === "ANGELONE") {
@@ -1377,8 +1489,17 @@ export default function MarketTerminal() {
           executedQty: 0,
           message: errorMsg
         };
+      } finally {
+        try {
+          release();
+        } catch (e) {
+          // swallow
+        }
       }
     } else {
+      // Offline Simulated execution (serialized)
+      const releaseSim = await orderMutexRef.current.acquire();
+      try {
       // Offline Simulated execution
       let estPrice = 150.0;
       const matchedTicker = curRef.mockPositions.find((p: Position) => p.symbol === symbolClean);
@@ -1450,21 +1571,67 @@ export default function MarketTerminal() {
           }
         }
 
-        simulatedExecutedQty = execQty;
+        // Simulate realistic execution: possible partial fill, extra slippage, and liquidity rejection
+        const liquidityRoll = Math.random();
+        // Very small chance of outright liquidity rejection
+        if (liquidityRoll < 0.03) {
+          addAutopilotLog(`Simulated LIVE BLOCK: Liquidity/rejection for BUY ${symbolClean}.`, "warn");
+          addLog(symbolClean, "AUTO_BUY_SIM_FAILED", `Simulated liquidity rejection for BUY ${symbolClean}.`, "WARNING");
+          return {
+            status: "BLOCKED",
+            code: "BLOCKED_LIQUIDITY",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: 0,
+            message: "Simulated liquidity rejection."
+          };
+        }
 
-        setSimCash((c) => c - totalDebitWithFees);
+        // Partial-fill chance
+        let fillFraction = 1;
+        if (liquidityRoll > 0.85) {
+          fillFraction = 0.4 + Math.random() * 0.6; // 40% - 100%
+        }
+
+        const executedQty = symbolClean === "BTCUSD"
+          ? parseFloat((execQty * fillFraction).toFixed(4))
+          : parseFloat((execQty * fillFraction).toFixed(2));
+
+        if (executedQty < (symbolClean === "BTCUSD" ? 0.0001 : 0.01)) {
+          addAutopilotLog(`Blocked simulated automated BUY: executed qty ${executedQty} is negligible after partial fill.`, "warn");
+          return {
+            status: "BLOCKED",
+            code: "BLOCKED_NEGLIGIBLE_QTY",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: 0,
+            message: `Executed quantity ${executedQty} is below minimum executable size.`
+          };
+        }
+
+        // Apply additional slippage to executed price
+        const extraSlippage = slippageRate + Math.random() * 0.005; // add up to 0.5% extra
+        const executedPrice = estPrice * (1 + (side === "BUY" ? 1 : -1) * extraSlippage);
+        const executedCost = executedQty * executedPrice;
+        const executedFees = parseFloat((flatBrokerage + executedCost * taxRate + executedCost * slippageRate).toFixed(2));
+        const executedDebit = executedCost + executedFees;
+
+        simulatedExecutedQty = executedQty;
+
+        setSimCash((c) => c - executedDebit);
         setMockPositions((prev) => {
           const exists = prev.find((p) => p.symbol === symbolClean);
           if (exists) {
-            const updatedQty = exists.qty + execQty;
+            const updatedQty = exists.qty + executedQty;
             if (Math.abs(updatedQty) < 0.0001) {
               return prev.filter((p) => p.symbol !== symbolClean);
             }
             let newAvgEntry = exists.avg_entry_price;
             let unrealized = 0;
             if (exists.qty > 0) {
-              // Include fee drag directly into average entry price to represent true dynamic breakeven!
-              const actualSpent = exists.avg_entry_price * exists.qty + execOrderCost + execOrderFees;
+              const actualSpent = exists.avg_entry_price * exists.qty + executedCost + executedFees;
               newAvgEntry = actualSpent / updatedQty;
               unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
             } else {
@@ -1472,7 +1639,7 @@ export default function MarketTerminal() {
                 newAvgEntry = exists.avg_entry_price;
                 unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
               } else {
-                newAvgEntry = (execOrderCost + execOrderFees) / updatedQty;
+                newAvgEntry = (executedCost + executedFees) / updatedQty;
                 unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
               }
             }
@@ -1488,34 +1655,71 @@ export default function MarketTerminal() {
                 : p
             );
           } else {
-            // Adjust average entry price to incorporate transaction cost drag
-            const realAvgEntry = parseFloat(((execOrderCost + execOrderFees) / execQty).toFixed(4));
+            const realAvgEntry = parseFloat(((executedCost + executedFees) / executedQty).toFixed(4));
             return [
               ...prev,
               {
                 symbol: symbolClean,
-                qty: execQty,
+                qty: executedQty,
                 avg_entry_price: realAvgEntry,
-                current_price: estPrice,
-                market_value: parseFloat(execOrderCost.toFixed(2)),
-                unrealized_pl: parseFloat((execOrderCost - realAvgEntry * execQty).toFixed(2)),
+                current_price: executedPrice,
+                market_value: parseFloat(executedCost.toFixed(2)),
+                unrealized_pl: parseFloat((executedCost - realAvgEntry * executedQty).toFixed(2)),
                 unrealized_plpc: 0,
                 maintenance_margin_rate: 0.30,
               },
             ];
           }
         });
-        addAutopilotLog(`Sim purchase complete: Acquired ${execQty} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (Fees & slippage deducted: ${currencySymbol}${execOrderFees.toFixed(2)}).`, "success");
-        addLog(symbolClean, "AUTO_BUY_SIM", `Purchased simulated ${execQty} shares of ${symbolClean} at fee-adjusted cost basis (Fee: ${currencySymbol}${execOrderFees.toFixed(2)})`, "SUCCESS");
+        addAutopilotLog(`Sim purchase complete: Acquired ${executedQty} ${symbolClean} at ${currencySymbol}${executedPrice.toFixed(2)} (Fees: ${currencySymbol}${executedFees.toFixed(2)}).`, "success");
+        addLog(symbolClean, "AUTO_BUY_SIM", `Purchased simulated ${executedQty} ${symbolClean} at fee-adjusted cost basis (Fee: ${currencySymbol}${executedFees.toFixed(2)})`, "SUCCESS");
       } else {
         // Simulated SELL (With support for Short Selling / Cover)
-        // Deduct fees from proceeds
-        const netProceeds = orderCost - orderFees;
-        setSimCash((c) => c + netProceeds);
+        // Simulate SELL: possible partial fill and price improvement/slippage
+        const sellLiquidityRoll = Math.random();
+        if (sellLiquidityRoll < 0.03) {
+          addAutopilotLog(`Simulated LIVE BLOCK: Liquidity/rejection for SELL ${symbolClean}.`, "warn");
+          addLog(symbolClean, "AUTO_SELL_SIM_FAILED", `Simulated liquidity rejection for SELL ${symbolClean}.`, "WARNING");
+          return {
+            status: "BLOCKED",
+            code: "BLOCKED_LIQUIDITY",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: 0,
+            message: "Simulated liquidity rejection."
+          };
+        }
+
+        let sellFillFraction = 1;
+        if (sellLiquidityRoll > 0.85) sellFillFraction = 0.4 + Math.random() * 0.6;
+        const executedSellQty = symbolClean === "BTCUSD"
+          ? parseFloat((qtyNum * sellFillFraction).toFixed(4))
+          : parseFloat((qtyNum * sellFillFraction).toFixed(2));
+
+        if (executedSellQty < (symbolClean === "BTCUSD" ? 0.0001 : 0.01)) {
+          addAutopilotLog(`Blocked simulated automated SELL: executed qty ${executedSellQty} is negligible after partial fill.`, "warn");
+          return {
+            status: "BLOCKED",
+            code: "BLOCKED_NEGLIGIBLE_QTY",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: 0,
+            message: `Executed quantity ${executedSellQty} is below minimum executable size.`
+          };
+        }
+
+        const sellExtraSlippage = slippageRate + Math.random() * 0.005;
+        const executedSellPrice = estPrice * (1 - sellExtraSlippage);
+        const sellProceeds = executedSellQty * executedSellPrice;
+        const sellFees = parseFloat((flatBrokerage + sellProceeds * taxRate + sellProceeds * slippageRate).toFixed(2));
+
+        setSimCash((c) => c + (sellProceeds - sellFees));
         setMockPositions((prev) => {
           const exists = prev.find((p) => p.symbol === symbolClean);
           if (exists) {
-            const updatedQty = exists.qty - qtyNum;
+            const updatedQty = exists.qty - executedSellQty;
             if (Math.abs(updatedQty) < 0.0001) {
               return prev.filter((p) => p.symbol !== symbolClean);
             }
@@ -1526,13 +1730,11 @@ export default function MarketTerminal() {
                 newAvgEntry = exists.avg_entry_price;
                 unrealized = updatedQty * exists.current_price - (newAvgEntry * updatedQty);
               } else {
-                // Short position entry fee-drag adjust
-                newAvgEntry = parseFloat(((orderCost - orderFees) / Math.abs(updatedQty)).toFixed(4));
+                newAvgEntry = parseFloat(((sellProceeds - sellFees) / Math.abs(updatedQty)).toFixed(4));
                 unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
               }
             } else {
-              // Average entry price formulation including transaction fee drag for Shorts
-              const totalAcquiredShort = exists.avg_entry_price * Math.abs(exists.qty) + orderCost - orderFees;
+              const totalAcquiredShort = exists.avg_entry_price * Math.abs(exists.qty) + sellProceeds - sellFees;
               newAvgEntry = totalAcquiredShort / Math.abs(updatedQty);
               unrealized = (newAvgEntry - exists.current_price) * (-updatedQty);
             }
@@ -1548,26 +1750,25 @@ export default function MarketTerminal() {
                 : p
             );
           } else {
-            const updatedQty = -qtyNum;
-            // Adjust avg entry for short to include drag
-            const realAvgEntry = parseFloat(((orderCost - orderFees) / qtyNum).toFixed(4));
+            const updatedQty = -executedSellQty;
+            const realAvgEntry = parseFloat(((sellProceeds - sellFees) / executedSellQty).toFixed(4));
             return [
               ...prev,
               {
                 symbol: symbolClean,
                 qty: parseFloat(updatedQty.toFixed(4)),
                 avg_entry_price: realAvgEntry,
-                current_price: estPrice,
-                market_value: parseFloat((updatedQty * estPrice).toFixed(2)),
-                unrealized_pl: parseFloat(((realAvgEntry - estPrice) * (-updatedQty)).toFixed(2)),
+                current_price: executedSellPrice,
+                market_value: parseFloat((updatedQty * executedSellPrice).toFixed(2)),
+                unrealized_pl: parseFloat(((realAvgEntry - executedSellPrice) * (-updatedQty)).toFixed(2)),
                 unrealized_plpc: 0,
                 maintenance_margin_rate: 0.30,
               },
             ];
           }
         });
-        addAutopilotLog(`Sim sale complete: Sold/Short-sold ${qtyNum} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (Fees & slippage deducted: ${currencySymbol}${orderFees.toFixed(2)}).`, "success");
-        addLog(symbolClean, "AUTO_SELL_SIM", `Sold simulated ${qtyNum} shares of ${symbolClean} with net credit (Fees & taxes: ${currencySymbol}${orderFees.toFixed(2)})`, "SUCCESS");
+        addAutopilotLog(`Sim sale complete: Sold/Short-sold ${executedSellQty} ${symbolClean} at ${currencySymbol}${executedSellPrice.toFixed(2)} (Fees: ${currencySymbol}${sellFees.toFixed(2)}).`, "success");
+        addLog(symbolClean, "AUTO_SELL_SIM", `Sold simulated ${executedSellQty} ${symbolClean} with net credit (Fees & taxes: ${currencySymbol}${sellFees.toFixed(2)})`, "SUCCESS");
       }
 
       if (isLossCloseAttempt) {
@@ -1596,6 +1797,13 @@ export default function MarketTerminal() {
         executedQty: side === "BUY" ? simulatedExecutedQty : qtyNum,
         message: "Simulated order filled."
       };
+      } finally {
+        try {
+          releaseSim();
+        } catch (e) {
+          // swallow
+        }
+      }
     }
   }, [addAutopilotLog, addLog, armLiquidationCooldown, isLossMakingPosition]);
 
@@ -1744,16 +1952,8 @@ export default function MarketTerminal() {
         addAutopilotLog(`Triggering Micro-Scalper engine on target ticker: ${targetSymbol}...`, "info");
         
         const matched = currentActivePositions.find((p) => p.symbol === targetSymbol);
-        let currentSpotPrice = 150.0;
-        if (matched) {
-          currentSpotPrice = matched.current_price;
-        } else {
-          if (targetSymbol === "AAPL") currentSpotPrice = 182.2;
-          else if (targetSymbol === "TSLA") currentSpotPrice = 195.0;
-          else if (targetSymbol === "NVDA") currentSpotPrice = 115.5;
-          else if (targetSymbol === "BTCUSD") currentSpotPrice = 67200.0;
-          else if (targetSymbol === "MSFT") currentSpotPrice = 425.0;
-        }
+        const livePriceFromAccount = curRef.alpacaPositions?.find((p: any) => p.symbol === targetSymbol)?.current_price || 0;
+        let currentSpotPrice = matched?.current_price || livePriceFromAccount || 150.0;
 
         const existingScalperPos = currentActivePositions.find((p) => p.symbol === targetSymbol);
         const hasPendingSeedBuy = autopilotPendingBuySymbolsRef.current.has(targetSymbol);
@@ -1837,7 +2037,7 @@ export default function MarketTerminal() {
       else if (curRef.autopilotStrategy === "TOUCH_TURN") {
         addAutopilotLog(`Triggering Touch & Turn (Opening-Range Scalper) on target: ${targetSymbol}...`, "info");
 
-        let tState = curRef.touchTurnState;
+        let tState = (curRef.touchTurnStateMap || {})[targetSymbol] || curRef.touchTurnState || null;
         if (!tState || tState.symbol !== targetSymbol) {
           // Calculate ATR & Opening candle bounds based on broker and symbol
           let atr14 = 5.0;
@@ -2062,7 +2262,7 @@ export default function MarketTerminal() {
         }
 
         const curPrefix = curRef.brokerType === "ANGELONE" ? "₹" : "$";
-        let mState = curRef.macdState;
+        let mState = (curRef.macdStateMap || {})[targetSymbol] || curRef.macdState || null;
 
         if (!mState || mState.symbol !== targetSymbol) {
           // Initialize mathematical MACD setup with 40 backward steps
@@ -2272,7 +2472,7 @@ export default function MarketTerminal() {
         }
 
         const curPrefix = curRef.brokerType === "ANGELONE" ? "₹" : "$";
-        let sState = curRef.sneakyPivotState;
+        let sState = (curRef.sneakyPivotStateMap || {})[targetSymbol] || curRef.sneakyPivotState || null;
 
         if (!sState || sState.symbol !== targetSymbol) {
           // Initialize horizontal level boundaries representing the "trading box"
@@ -4846,6 +5046,33 @@ if __name__ == "__main__":
         </div>
       </section>
 
+      {/* Market hours banner */}
+      {brokerType === "ALPACA" && (
+        <div id="market-hours-banner" className={`mb-4 rounded-lg px-4 py-2.5 flex items-center gap-3 text-xs font-mono border ${
+          marketSession === "OPEN"
+            ? "bg-emerald-950/40 border-brand-green/30 text-brand-green"
+            : marketSession === "EXTENDED"
+            ? "bg-amber-950/40 border-amber-500/30 text-amber-300"
+            : "bg-red-950/30 border-brand-red/25 text-red-400"
+        }`}>
+          <span className={`h-2 w-2 rounded-full flex-shrink-0 ${
+            marketSession === "OPEN" ? "bg-brand-green animate-pulse" :
+            marketSession === "EXTENDED" ? "bg-amber-400 animate-pulse" : "bg-red-500"
+          }`} />
+          <span className="font-bold uppercase tracking-wider">
+            {marketSession === "OPEN" ? "Market Open" : marketSession === "EXTENDED" ? "Extended Hours" : "Market Closed"}
+          </span>
+          <span className="text-gray-400">—</span>
+          <span className="text-gray-300">
+            {marketSession === "OPEN"
+              ? "Regular session active (9:30 AM – 4:00 PM ET). All order types supported."
+              : marketSession === "EXTENDED"
+              ? "Extended hours (4:00–8:00 AM / 4:00–8:00 PM ET). Equity orders use limit + extended_hours=true. Expect wider spreads and lower fills."
+              : "Market closed. Only crypto (BTCUSD/ETHUSD) trades 24/7. Equity orders will be rejected until pre-market opens at 4:00 AM ET."}
+          </span>
+        </div>
+      )}
+
       {/* Row: Active Positions Table & Interactive Order Terminal */}
       <section className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8" id="grid-table-and-terminal">
         
@@ -5472,6 +5699,24 @@ if __name__ == "__main__":
                       <p className="text-[9px] text-gray-500 mt-1">Filter low-liquidity tickers (avg daily vol).</p>
                     </div>
 
+                    {/* Live short toggle - visible only when live mode is active */}
+                    {useAlpacaLive && (
+                      <div className="col-span-3 flex items-start gap-2 pt-3" id="allow-live-shorts-row">
+                        <input
+                          type="checkbox"
+                          id="allow-live-shorts"
+                          checked={allowLiveShorts}
+                          onChange={(e) => {
+                            setAllowLiveShorts(e.target.checked);
+                            try { if (typeof window !== 'undefined') localStorage.setItem('sentry:allowLiveShorts', String(e.target.checked)); } catch (err) {}
+                          }}
+                          className="rounded bg-brand-bg border-brand-border text-brand-green focus:ring-0 cursor-pointer h-4 w-4 mt-1"
+                        />
+                        <label htmlFor="allow-live-shorts" className="text-[10px] text-gray-400 font-mono">
+                          Allow Live Shorts: enable autopilot to open new short positions in live mode (requires margin/buying power).
+                        </label>
+                      </div>
+                    )}
                     <div>
                       <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Max Exposure % / Symbol</label>
                       <input
