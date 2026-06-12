@@ -62,7 +62,16 @@ const NSE_INSTRUMENT_TOKENS: { [key: string]: string } = {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { angelApiKey, angelClientCode, angelMpin, angelTotpSeed, symbol, qty, side, isMockConnection } = body;
+    let { angelApiKey, angelClientCode, angelMpin, angelTotpSeed, symbol, qty, side, isMockConnection } = body;
+
+    // If the client did not provide AngelOne credentials, attempt to use server-side
+    // environment variables so trading can be automatic (like Alpaca) without UI prompts.
+    if (!angelApiKey || !angelClientCode || !angelMpin) {
+      angelApiKey = angelApiKey || process.env.ANGEL_API_KEY || "";
+      angelClientCode = angelClientCode || process.env.ANGEL_CLIENT_CODE || "";
+      angelMpin = angelMpin || process.env.ANGEL_MPIN || "";
+      angelTotpSeed = angelTotpSeed || process.env.ANGEL_TOTP_SEED || "";
+    }
 
     const symbolUpper = (symbol || "").toUpperCase().trim();
     const qtyNum = parseFloat(qty) || 1;
@@ -92,6 +101,7 @@ export async function POST(req: Request) {
     }
 
     // Live Trade execution
+    // If a TOTP seed is available (from client or server env), generate the OTP automatically.
     const totpToken = angelTotpSeed ? generateTOTP(angelTotpSeed) : "";
     
     // Login to obtain active session
