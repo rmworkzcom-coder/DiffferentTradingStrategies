@@ -115,6 +115,27 @@ function PositionSparkline({ symbol, currentPl, totalCost }: { symbol: string; c
     setMounted(true);
   }, []);
 
+  // Restore autopilot strategy from localStorage if present
+  useEffect(() => {
+    try {
+      const savedStrategy = localStorage.getItem("AUTOPILOT_STRATEGY");
+      if (savedStrategy) {
+        setAutopilotStrategy(savedStrategy as any);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, []);
+
+  // Persist autopilot strategy whenever it changes
+  useEffect(() => {
+    try {
+      localStorage.setItem("AUTOPILOT_STRATEGY", autopilotStrategy);
+    } catch (e) {
+      // ignore
+    }
+  }, [autopilotStrategy]);
+
   // Generate initial 24h history leading up to the current P/L
   useEffect(() => {
     if (!mounted) return;
@@ -411,6 +432,7 @@ export default function MarketTerminal() {
 
   // --- SENTRY AUTOPILOT STATE VARIABLES & ENGINES ---
   const [isAutopilotActive, setIsAutopilotActive] = useState(false);
+  const [autopilotAutoStart, setAutopilotAutoStart] = useState<boolean>(false);
   const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER" | "TOUCH_TURN" | "MACD_FRONT_SIDE" | "SNEAKY_PIVOT" | "ELLIOTT_WAVE">("SCALPER");
 
   // Elliott Wave state map for tracking wave counts per symbol
@@ -1601,11 +1623,28 @@ export default function MarketTerminal() {
           const normSymbol = normalizeSymbol(symbolClean);
           const estPrice = curRef.alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
           const intendedCost = estPrice * finalQty;
-          const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-          const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
-          const isFractional = finalQty % 1 !== 0;
-          const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
-          const maxSafeOrderVal = maxAllowedPower * 0.7;
+
+          // Prefer server-side Binance futures USDT balance when available
+          let maxSafeOrderVal = 0;
+          try {
+            const prefRes = await fetch('/api/binance/preferred-usdt');
+            const pref = await prefRes.json();
+            const prefUsdt = parseFloat(pref?.usdt || 0) || 0;
+            if (prefUsdt > 0) {
+              maxSafeOrderVal = prefUsdt * 0.9; // keep 10% buffer
+            }
+          } catch (e) {
+            // ignore and fallback
+          }
+
+          if (!maxSafeOrderVal || maxSafeOrderVal <= 0) {
+            const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
+            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+            const isFractional = finalQty % 1 !== 0;
+            const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
+            maxSafeOrderVal = maxAllowedPower * 0.7;
+          }
+
           if (intendedCost > maxSafeOrderVal) {
             setIsPlacingOrder(false);
             setOrderError(`Blocked: insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`);
@@ -1618,15 +1657,6 @@ export default function MarketTerminal() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: finalQty, isLive: true, openShort: side === "SELL" }),
           });
-
-          // Persist angel server-creds toggle
-          useEffect(() => {
-            try {
-              localStorage.setItem("ANGEL_USE_SERVER_CREDS", angelUseServerCreds ? "true" : "false");
-            } catch (e) {
-              // ignore
-            }
-          }, [angelUseServerCreds]);
         } else if (curRef.brokerType === "ANGELONE") {
           // For AngelOne, use paper/sandbox mode automatically when `isPaper` is set.
           const isMockConn = !!curRef.isPaper || !curRef.angelApiKey || !curRef.angelClientCode;
@@ -3573,26 +3603,6 @@ export default function MarketTerminal() {
         body: JSON.stringify(payload),
       });
 
-      // Restore autopilot strategy from localStorage if present
-      useEffect(() => {
-        try {
-          const savedStrategy = localStorage.getItem("AUTOPILOT_STRATEGY");
-          if (savedStrategy) {
-            setAutopilotStrategy(savedStrategy as any);
-          }
-        } catch (e) {
-          // ignore
-        }
-      }, []);
-
-      // Persist autopilot strategy whenever it changes
-      useEffect(() => {
-        try {
-          localStorage.setItem("AUTOPILOT_STRATEGY", autopilotStrategy);
-        } catch (e) {
-          // ignore
-        }
-      }, [autopilotStrategy]);
 
       const resText = await response.text();
       let rawData: any = null;
@@ -6336,6 +6346,12 @@ if __name__ == "__main__":
                       ? "Bot is actively intercepting and optimizing positions automatically."
                       : "Bot idle. Activate to take over trading based on rules / AI directives."}
                   </p>
+                  <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-gray-400 font-mono">
+                    <label className="inline-flex items-center gap-2">
+                      <input type="checkbox" checked={autopilotAutoStart} onChange={(e) => setAutopilotAutoStart(e.target.checked)} className="form-checkbox" />
+                      <span>Auto-start on load</span>
+                    </label>
+                  </div>
                   {lastAutopilotOrderOutcome?.status === "PENDING" && (
                     <div id="autopilot-broker-pending-badge" className="mt-2 rounded-md border border-amber-600/60 bg-amber-950/30 px-2.5 py-1.5 text-[10px] text-amber-300 font-mono text-center">
                       Broker fill pending: {lastAutopilotOrderOutcome.side} {lastAutopilotOrderOutcome.requestedQty} {lastAutopilotOrderOutcome.symbol}. Waiting for broker confirmation before next seed buy.
