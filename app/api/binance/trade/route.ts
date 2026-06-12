@@ -109,8 +109,10 @@ export async function POST(req: Request) {
         if (d2 && d2.account && Array.isArray(d2.account.balances)) {
           const usdt = d2.account.balances.find((b: any) => b.asset === 'USDT' || b.asset === 'USD');
           if (usdt) {
-            const val = parseFloat(usdt.free || usdt.balance || '0');
-            console.log('✅ Spot USDT found:', val);
+            const free   = parseFloat(usdt.free   || '0');
+            const locked = parseFloat(usdt.locked  || '0');
+            const val = free + locked;
+            console.log(`✅ Spot USDT found: free=${free} locked=${locked} total=${val}`);
             if (!isNaN(val) && val > 0) return { usdt: val, source: "spot" };
           }
         }

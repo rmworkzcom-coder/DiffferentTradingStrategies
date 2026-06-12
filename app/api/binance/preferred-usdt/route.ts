@@ -34,9 +34,12 @@ export async function GET() {
     if (spot && spot.account && Array.isArray(spot.account.balances)) {
       const usdt = spot.account.balances.find((b: any) => b.asset === 'USDT' || b.asset === 'USD');
       if (usdt) {
-        const val = parseFloat(usdt.free || usdt.balance || '0');
-        console.log(`✅ Spot USDT: ${val}`);
-        return NextResponse.json({ usdt: val, source: 'spot' });
+        // Use free + locked so temporarily-locked funds (e.g. open orders) don't zero out the balance
+        const free   = parseFloat(usdt.free   || '0');
+        const locked = parseFloat(usdt.locked  || '0');
+        const val = free + locked;
+        console.log(`✅ Spot USDT: free=${free} locked=${locked} total=${val}`);
+        if (val > 0) return NextResponse.json({ usdt: val, source: 'spot' });
       }
     }
     console.warn('⚠️ No USDT found in any account');
