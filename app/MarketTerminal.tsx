@@ -3016,6 +3016,54 @@ export default function MarketTerminal() {
         }
       }
 
+      else if (curRef.autopilotStrategy === "ELLIOTT_WAVE") {
+        addAutopilotLog(`🌊 Running simple Elliott Wave scanner on ${targetSymbol}...`, "info");
+
+        // Very lightweight, heuristic Elliott wave impulse detector:
+        // - Track recent peaks/valleys and look for a sequence resembling 5-wave impulse (1-2-3-4-5)
+        // - We use mocked price history when live price not available and act conservatively with tiny orders
+        const matched = currentActivePositions.find((p) => p.symbol === targetSymbol);
+        let currentSpotPrice = matched?.current_price || (targetSymbol === "RELIANCE" ? 2475.5 : 100.0);
+
+        const state = (curRef.elliottStateMap || {})[targetSymbol] || { symbol: targetSymbol, waveIndex: 0, peaks: [], status: 'SCANNING' };
+
+        // Maintain a rolling list of 6 anchors (peaks + troughs)
+        const anchors = (state.peaks || []).slice(-6);
+        anchors.push(currentSpotPrice);
+        while (anchors.length > 6) anchors.shift();
+
+        // rudimentary slope-based wave detection: count alternations of higher-high / lower-low
+        let waveIndex = state.waveIndex;
+        try {
+          if (anchors.length >= 3) {
+            const a = anchors[anchors.length - 3];
+            const b = anchors[anchors.length - 2];
+            const c = anchors[anchors.length - 1];
+            // detect local impulsive move (a->b->c) where b is a swing high/low
+            if (b > a && b > c && waveIndex % 2 === 0) {
+              // swing high detected — advance wave
+              waveIndex = Math.min(5, waveIndex + 1);
+            } else if (b < a && b < c && waveIndex % 2 === 1) {
+              waveIndex = Math.min(5, waveIndex + 1);
+            }
+          }
+        } catch (e) {}
+
+        const newState = { ...state, waveIndex, peaks: anchors, status: waveIndex >= 5 ? 'IMPULSE_DETECTED' : state.status };
+        setElliottState(newState);
+
+        // If we detected a 5-wave impulse, attempt a small mean-reversion SELL (take profit) or BUY depending on context
+        if (newState.status === 'IMPULSE_DETECTED') {
+          addAutopilotLog(`🌊 Elliott 5-wave impulse detected on ${targetSymbol}. Initiating conservative exit/balance action.`, "trade");
+          const qty = targetSymbol === 'BTCUSD' ? 0.005 : 1;
+          const action = 'SELL';
+          const orderOutcome = await executeAutopilotOrder(targetSymbol, action, qty);
+          logScanOrderOutcome('ELLIOTT_WAVE', orderOutcome);
+          // reset state after action
+          setElliottState({ symbol: targetSymbol, waveIndex: 0, peaks: [], status: 'IDLE' });
+        }
+      }
+
       else if (curRef.autopilotStrategy === "GEMINI_AI") {
         addAutopilotLog(`Querying Gemini AI Strategist model on ${targetSymbol}...`, "info");
         
