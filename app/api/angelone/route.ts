@@ -53,7 +53,16 @@ function generateTOTP(secret: string): string {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { angelApiKey, angelClientCode, angelMpin, angelTotpSeed, isMockConnection } = body;
+    let { angelApiKey, angelClientCode, angelMpin, angelTotpSeed, isMockConnection, useServerCreds } = body;
+
+    // Allow the client to request the server to use environment-stored credentials
+    // when `useServerCreds: true` is present in the request body.
+    if (useServerCreds) {
+      angelApiKey = angelApiKey || process.env.ANGEL_API_KEY || "";
+      angelClientCode = angelClientCode || process.env.ANGEL_CLIENT_CODE || "";
+      angelMpin = angelMpin || process.env.ANGEL_MPIN || "";
+      angelTotpSeed = angelTotpSeed || process.env.ANGEL_TOTP_SEED || "";
+    }
 
     // High fidelity Indian Market Simulator default fallback configurations
     const IndianSandboxAccount = {
@@ -154,12 +163,21 @@ export async function POST(req: Request) {
       body: JSON.stringify(loginBody)
     });
 
+    // Read login response as text and attempt to parse JSON; include HTML snippets in error messages
+    const loginText = await loginRes.text();
     if (!loginRes.ok) {
-      const errorText = await loginRes.text();
-      throw new Error(`AngelOne authentication server rejected credentials with HTTP ${loginRes.status}: ${errorText || "Invalid credentials"}`);
+      const snippet = loginText.slice(0, 1024);
+      throw new Error(`AngelOne authentication server rejected credentials HTTP ${loginRes.status}: ${snippet}`);
     }
 
-    const loginData = await loginRes.json();
+    let loginData: any = null;
+    try {
+      loginData = JSON.parse(loginText);
+    } catch (e: any) {
+      const snippet = loginText.slice(0, 1024);
+      throw new Error(`Login response parse error: ${e?.message || e}. Body Snippet: ${snippet}`);
+    }
+
     if (loginData.status === false || !loginData.data?.jwtToken) {
       const errMsg = loginData.message || "Invalid credentials or MPIN/TOTP seed combination.";
       throw new Error(`Angel One authentication error: ${errMsg}`);

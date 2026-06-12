@@ -134,13 +134,25 @@ export async function POST(req: Request) {
       })
     });
 
+    // If login failed or returned non-JSON (HTML/error page), capture details for debugging
     if (!loginRes.ok) {
-      throw new Error("Unable to log in to AngelOne before transmitting trade.");
+      const bodyText = await loginRes.text();
+      const snippet = bodyText.slice(0, 1024);
+      throw new Error(`Login HTTP ${loginRes.status} ${loginRes.statusText}: ${snippet}`);
     }
 
-    const loginData = await loginRes.json();
-    if (loginData.status === false || !loginData.data?.jwtToken) {
-      throw new Error(`AngelOne Auth Rejected: ${loginData.message || "Invalid credentials"}`);
+    // Read response as text first and parse JSON to avoid body/clone issues
+    const loginText = await loginRes.text();
+    let loginData: any = null;
+    try {
+      loginData = JSON.parse(loginText);
+    } catch (e: any) {
+      const snippet = loginText.slice(0, 1024);
+      throw new Error(`Login response parse error: ${e?.message || e}. Body Snippet: ${snippet}`);
+    }
+
+    if (loginData?.status === false || !loginData?.data?.jwtToken) {
+      throw new Error(`AngelOne Auth Rejected: ${loginData?.message || "Invalid credentials or consent required"}`);
     }
 
     const { jwtToken } = loginData.data;
@@ -181,15 +193,23 @@ export async function POST(req: Request) {
       headers: secureHeaders,
       body: JSON.stringify(orderPayload)
     });
-
     if (!orderResponse.ok) {
-      const errTxt = await orderResponse.text();
-      throw new Error(`NSE Exchange rejected market order: ${errTxt}`);
+      const bodyText = await orderResponse.text();
+      const snippet = bodyText.slice(0, 2048);
+      throw new Error(`Order HTTP ${orderResponse.status} ${orderResponse.statusText}: ${snippet}`);
     }
 
-    const orderData = await orderResponse.json();
-    if (orderData.status === false) {
-      throw new Error(`SmartAPI Order Rejection: ${orderData.message || "Generic transaction error"}`);
+    const orderText = await orderResponse.text();
+    let orderData: any = null;
+    try {
+      orderData = JSON.parse(orderText);
+    } catch (e: any) {
+      const snippet = orderText.slice(0, 2048);
+      throw new Error(`Order response parse error: ${e?.message || e}. Body Snippet: ${snippet}`);
+    }
+
+    if (orderData?.status === false) {
+      throw new Error(`SmartAPI Order Rejection: ${orderData?.message || "Generic transaction error"}`);
     }
 
     // Resolve average fill price based on static mock estimates or response parameters
@@ -212,10 +232,13 @@ export async function POST(req: Request) {
     });
 
   } catch (error: any) {
+    // Surface structured diagnostics for non-JSON/HTML responses while keeping sensitive data out
     console.error("SmartAPI Trade Placement Exception:", error);
+    const message = String(error?.message || "Internal failure placing NSE transaction on AngelOne.");
+    const safeSnippet = message.slice(0, 4000);
     return NextResponse.json(
-      { error: error?.message || "Internal failure placing NSE transaction on AngelOne." },
-      { status: 200 }
+      { error: "SmartAPI Trade Placement Exception", details: safeSnippet },
+      { status: 502 }
     );
   }
 }
