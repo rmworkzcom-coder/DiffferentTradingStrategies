@@ -1595,6 +1595,8 @@ export default function MarketTerminal() {
             body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: finalQty, isLive: true, openShort: side === "SELL" }),
           });
         } else if (curRef.brokerType === "ANGELONE") {
+          // For AngelOne, use paper/sandbox mode automatically when `isPaper` is set.
+          const isMockConn = !!curRef.isPaper || !curRef.angelApiKey || !curRef.angelClientCode;
           response = await fetch("/api/angelone/trade", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1606,7 +1608,7 @@ export default function MarketTerminal() {
               symbol: symbolClean,
               qty: finalQty,
               side: side.toLowerCase(),
-              isMockConnection: false
+              isMockConnection: isMockConn
             }),
           });
         } else {
@@ -3953,7 +3955,7 @@ export default function MarketTerminal() {
 
         addLog("ANGELONE", side, `Transmitting Order: ${side} for ${qtyNum} share(s) of ${symbolClean} on NSE`, "INFO");
         try {
-          const isMockConn = isPaper || !angelApiKey || !angelClientCode;
+          const isMockConn = !!isPaper || !angelApiKey || !angelClientCode;
           const response = await fetch("/api/angelone/trade", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -4454,7 +4456,7 @@ export default function MarketTerminal() {
               symbol: symbolClean,
               qty: existingPos.qty,
               side: "sell",
-              isMockConnection: !angelApiKey || !angelClientCode,
+              isMockConnection: !!isPaper || !angelApiKey || !angelClientCode,
             }),
           });
           
