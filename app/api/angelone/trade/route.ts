@@ -64,9 +64,11 @@ export async function POST(req: Request) {
     const body = await req.json();
     let { angelApiKey, angelClientCode, angelMpin, angelTotpSeed, symbol, qty, side, isMockConnection } = body;
 
-    // If the client did not provide AngelOne credentials, attempt to use server-side
-    // environment variables so trading can be automatic (like Alpaca) without UI prompts.
-    if (!angelApiKey || !angelClientCode || !angelMpin) {
+    // If the client did not provide AngelOne credentials, optionally use server-side
+    // environment variables when explicitly enabled. This prevents accidental live
+    // trades when the server has creds present but the operator prefers to use paper.
+    const useServerCreds = (process.env.ANGEL_USE_SERVER_CREDS || "false").toLowerCase() === "true";
+    if ((!angelApiKey || !angelClientCode || !angelMpin) && useServerCreds) {
       angelApiKey = angelApiKey || process.env.ANGEL_API_KEY || "";
       angelClientCode = angelClientCode || process.env.ANGEL_CLIENT_CODE || "";
       angelMpin = angelMpin || process.env.ANGEL_MPIN || "";
@@ -76,8 +78,14 @@ export async function POST(req: Request) {
     const symbolUpper = (symbol || "").toUpperCase().trim();
     const qtyNum = parseFloat(qty) || 1;
 
+    // Determine whether to simulate: client requested mock, server forced paper env,
+    // or credentials are missing/disabled.
+    const serverEnvMode = (process.env.ANGEL_ENV || "paper").toLowerCase();
+    const forcePaper = serverEnvMode === "paper";
+    const shouldMock = !!isMockConnection || forcePaper || !angelApiKey || !angelClientCode || !angelMpin;
+
     // Simulate ordering instantly if inputs are sandbox-oriented
-    if (isMockConnection || !angelApiKey || !angelClientCode || !angelMpin) {
+    if (shouldMock) {
       const generatedOrderId = `ANGEL-ORD-${Date.now()}-${Math.floor(Math.random() * 9000 + 1000)}`;
       
       let fillPrice = 2475.0;
