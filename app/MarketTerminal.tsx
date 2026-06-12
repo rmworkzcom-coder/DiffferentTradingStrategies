@@ -293,6 +293,7 @@ export default function MarketTerminal() {
   const [angelClientCode, setAngelClientCode] = useState("");
   const [angelMpin, setAngelMpin] = useState("");
   const [angelTotpSeed, setAngelTotpSeed] = useState("");
+  const [angelUseServerCreds, setAngelUseServerCreds] = useState(false);
 
   // Connection & loading flags
   const [isConnecting, setIsConnecting] = useState(false);
@@ -907,7 +908,8 @@ export default function MarketTerminal() {
             angelClientCode,
             angelMpin,
             angelTotpSeed,
-            isMockConnection: false
+            isMockConnection: false,
+            useServerCreds: angelUseServerCreds
           })
         });
 
@@ -1594,6 +1596,15 @@ export default function MarketTerminal() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: finalQty, isLive: true, openShort: side === "SELL" }),
           });
+
+          // Persist angel server-creds toggle
+          useEffect(() => {
+            try {
+              localStorage.setItem("ANGEL_USE_SERVER_CREDS", angelUseServerCreds ? "true" : "false");
+            } catch (e) {
+              // ignore
+            }
+          }, [angelUseServerCreds]);
         } else if (curRef.brokerType === "ANGELONE") {
           // For AngelOne, use paper/sandbox mode automatically when `isPaper` is set.
           const isMockConn = !!curRef.isPaper || !curRef.angelApiKey || !curRef.angelClientCode;
@@ -1608,7 +1619,8 @@ export default function MarketTerminal() {
               symbol: symbolClean,
               qty: finalQty,
               side: side.toLowerCase(),
-              isMockConnection: isMockConn
+              isMockConnection: isMockConn,
+              useServerCreds: curRef.angelUseServerCreds
             }),
           });
         } else {
@@ -3208,11 +3220,13 @@ export default function MarketTerminal() {
     const savedAngelClientCode = localStorage.getItem("ANGEL_CLIENT_CODE") || "";
     const savedAngelMpin = localStorage.getItem("ANGEL_MPIN") || "";
     const savedAngelTotpSeed = localStorage.getItem("ANGEL_TOTP_SEED") || "";
+    const savedAngelUseServerCreds = localStorage.getItem("ANGEL_USE_SERVER_CREDS") === "true";
 
     if (savedAngelApiKey) setAngelApiKey(savedAngelApiKey);
     if (savedAngelClientCode) setAngelClientCode(savedAngelClientCode);
     if (savedAngelMpin) setAngelMpin(savedAngelMpin);
     if (savedAngelTotpSeed) setAngelTotpSeed(savedAngelTotpSeed);
+    setAngelUseServerCreds(!!savedAngelUseServerCreds);
 
     setBrokerType(savedBrokerType);
 
@@ -3249,7 +3263,8 @@ export default function MarketTerminal() {
               angelClientCode: savedAngelClientCode,
               angelMpin: savedAngelMpin,
               angelTotpSeed: savedAngelTotpSeed,
-              isMockConnection: false
+              isMockConnection: false,
+              useServerCreds: savedAngelUseServerCreds
             }),
           });
 
@@ -3559,6 +3574,37 @@ export default function MarketTerminal() {
   };
 
   // Test live connection without persisting or switching modes
+  const handleTestLogin = async () => {
+    try {
+      if (brokerType !== "ANGELONE") {
+        showToast("Test Login is only for AngelOne broker.", "WARN");
+        return;
+      }
+      showToast("Testing AngelOne server auth...", "INFO");
+      const body: any = angelUseServerCreds
+        ? { useServerCreds: true }
+        : { useServerCreds: false, angelApiKey, angelClientCode, angelMpin, angelTotpSeed };
+
+      const res = await fetch("/api/angelone/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!res.ok || json?.error) {
+        showToast(`Auth Failed: ${json?.error || json?.msg || "Unknown error"}`, "CRITICAL");
+        addLog("ANGELONE", "AUTH_TEST", `Auth failed: ${json?.error || json?.msg || 'unknown'}`, "CRITICAL");
+      } else {
+        showToast(`Auth OK: ${json?.msg || "server_auth_success"}` , "SUCCESS");
+        addLog("ANGELONE", "AUTH_TEST", `Auth succeeded: ${json?.msg || 'ok'}`, "SUCCESS");
+      }
+    } catch (err: any) {
+      console.error("Auth test error:", err);
+      showToast(`Auth Error: ${err?.message || err}`, "CRITICAL");
+      addLog("ANGELONE", "AUTH_TEST", `Auth error: ${err?.message || err}`, "CRITICAL");
+    }
+  };
+
   const handleTestConnection = async () => {
     try {
       if (brokerType === "ANGELONE") {
@@ -3570,8 +3616,9 @@ export default function MarketTerminal() {
         const res = await fetch("/api/angelone", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ angelApiKey, angelClientCode, angelMpin, angelTotpSeed, isMockConnection: false }),
+          body: JSON.stringify({ angelApiKey, angelClientCode, angelMpin, angelTotpSeed, isMockConnection: false, useServerCreds: angelUseServerCreds }),
         });
+        // note: pass server-creds flag if user enabled it
         const text = await res.text();
         const raw = JSON.parse(text);
         if (!res.ok || raw?.error) {
@@ -4478,6 +4525,7 @@ export default function MarketTerminal() {
               qty: existingPos.qty,
               side: "sell",
               isMockConnection: !!isPaper || !angelApiKey || !angelClientCode,
+              useServerCreds: angelUseServerCreds,
             }),
           });
           
@@ -4667,6 +4715,7 @@ export default function MarketTerminal() {
                   qty: pos.qty,
                   side: "sell",
                   isMockConnection: !angelApiKey || !angelClientCode,
+                  useServerCreds: angelUseServerCreds,
                 }),
               });
               
@@ -4954,7 +5003,31 @@ if __name__ == "__main__":
           <option value="ANGELONE">AngelOne (India)</option>
         </select>
         {brokerType === 'ANGELONE' && (
-          <div className="text-xs text-muted">Paper mode supported; missing AngelOne keys will use simulator.</div>
+          <div className="flex flex-col text-xs">
+            <div className="text-xs text-muted">Paper mode supported; missing AngelOne keys will use simulator.</div>
+            <label className="flex items-center gap-2 mt-1">
+              <input
+                type="checkbox"
+                checked={!!angelUseServerCreds}
+                onChange={(e) => {
+                  const v = e.target.checked;
+                  setAngelUseServerCreds(v);
+                  try { localStorage.setItem('ANGEL_USE_SERVER_CREDS', String(v)); } catch (e) {}
+                  addLog('ANGELONE', 'SERVER_CREDS_TOGGLE', `Use server AngelOne creds: ${v}`, 'INFO');
+                }}
+                className="form-checkbox h-4 w-4"
+              />
+              <span className="text-xs">Use server AngelOne creds</span>
+            </label>
+            <div className="mt-2">
+              <button
+                onClick={handleTestLogin}
+                className="text-xs px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white"
+              >
+                Test Login
+              </button>
+            </div>
+          </div>
         )}
       </div>
       {/* Confirmation Modal */}
