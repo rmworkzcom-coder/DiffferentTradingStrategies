@@ -9,8 +9,14 @@ function sign(query: string, secret: string) {
 
 export async function GET(req: Request) {
   try {
-    const apiKey = process.env.BINANCE_LIVE_API_KEY;
-    const apiSecret = process.env.BINANCE_LIVE_API_SECRET;
+    const apiKey =
+      process.env.BINANCE_LIVE_API_KEY ||
+      process.env.BINANCE_KEY ||
+      process.env.EXCH_BINANCE_KEY;
+    const apiSecret =
+      process.env.BINANCE_LIVE_API_SECRET ||
+      process.env.BINANCE_SECRET ||
+      process.env.EXCH_BINANCE_SECRET;
     if (!apiKey || !apiSecret) {
       return NextResponse.json({ error: "BINANCE API credentials missing on server." }, { status: 200 });
     }

@@ -92,6 +92,7 @@ type AutopilotOrderOutcomeCode =
   | "BLOCKED_NEGLIGIBLE_QTY"
   | "BLOCKED_BUYING_POWER"
   | "BLOCKED_CRYPTO_ONLY"
+  | "BLOCKED_INSUFFICIENT_USDT"
   | "BLOCKED_LIQUIDITY"
   | "REJECTED_BROKER";
 
@@ -1620,7 +1621,16 @@ export default function MarketTerminal() {
           // normalize symbol and validate buying power before sending to exchange
           const normSymbol = normalizeSymbol(symbolClean);
           const estPrice = curRef.alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
-          const intendedCost = estPrice * finalQty;
+          let cryptoQtyToSend = finalQty;
+          if (side === "BUY") {
+            const maxCryptoBuyUsd = 100;
+            const cappedQty = parseFloat((maxCryptoBuyUsd / Math.max(estPrice, 0.0000001)).toFixed(6));
+            if (cryptoQtyToSend * estPrice > maxCryptoBuyUsd) {
+              cryptoQtyToSend = Math.max(cappedQty, 0);
+              addAutopilotLog(`Crypto BUY notional cap applied for ${normSymbol}: resized to ~$${maxCryptoBuyUsd.toFixed(2)}.`, "info");
+            }
+          }
+          const intendedCost = estPrice * cryptoQtyToSend;
 
           // Prefer server-side Binance futures USDT balance when available
           let maxSafeOrderVal = 0;
@@ -1646,14 +1656,22 @@ export default function MarketTerminal() {
           if (intendedCost > maxSafeOrderVal) {
             setIsPlacingOrder(false);
             setOrderError(`Blocked: insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`);
-            addLog(normSymbol, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`);
-            return;
+            addLog(normSymbol, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`, "WARNING");
+            return {
+              status: "BLOCKED",
+              code: "BLOCKED_BUYING_POWER",
+              symbol: symbolClean,
+              side,
+              requestedQty: qtyNum,
+              executedQty: 0,
+              message: `Insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`
+            };
           }
 
           response = await fetch("/api/binance/trade", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: finalQty, isLive: true, openShort: side === "SELL" }),
+            body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: cryptoQtyToSend, isLive: true, openShort: side === "SELL" }),
           });
         } else if (curRef.brokerType === "ANGELONE") {
           // For AngelOne, use paper/sandbox mode automatically when `isPaper` is set.
@@ -3675,7 +3693,7 @@ export default function MarketTerminal() {
   const handleTestLogin = async () => {
     try {
       if (brokerType !== "ANGELONE") {
-        showToast("Test Login is only for AngelOne broker.", "WARN");
+        showToast("Test Login is only for AngelOne broker.", "WARNING");
         return;
       }
       showToast("Testing AngelOne server auth...", "INFO");
@@ -3915,8 +3933,14 @@ export default function MarketTerminal() {
         addLog("BINANCE", side, `Transmitting Crypto Order to Binance: ${side} ${qtyNum} ${normSymbol} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
         try {
           // buying-power check for manual crypto orders — prefer Binance futures USDT when available, fallback to local Alpaca buying power
-          const estPrice = curRef.alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
-          const intendedCost = estPrice * parseFloat(qtyNum.toFixed(6));
+          const estPrice = alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
+          const maxCryptoBuyUsd = 100;
+          let qtyToSend = parseFloat(qtyNum.toFixed(6));
+          if (side === "BUY" && (qtyToSend * estPrice) > maxCryptoBuyUsd) {
+            qtyToSend = parseFloat((maxCryptoBuyUsd / Math.max(estPrice, 0.0000001)).toFixed(6));
+            addLog(normSymbol, "BUY_RESIZED", `Manual crypto BUY capped to ~$${maxCryptoBuyUsd.toFixed(2)} by policy.`, "INFO");
+          }
+          const intendedCost = estPrice * qtyToSend;
           let maxSafeOrderVal = 0;
           try {
             const prefRes = await fetch('/api/binance/preferred-usdt');
@@ -3930,8 +3954,8 @@ export default function MarketTerminal() {
           }
 
           if (maxSafeOrderVal <= 0) {
-            const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+            const cashValue = parseFloat(alpacaAccount?.cash || "0");
+            const rawBuyingPower = parseFloat(alpacaAccount?.buying_power || "0");
             const isFractional = qtyNum % 1 !== 0;
             const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
             maxSafeOrderVal = maxAllowedPower * 0.7;
@@ -3940,7 +3964,7 @@ export default function MarketTerminal() {
           if (intendedCost > maxSafeOrderVal) {
             setIsPlacingOrder(false);
             setOrderError(`Blocked: insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`);
-            addLog(normSymbol, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`);
+            addLog(normSymbol, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`, "WARNING");
             return;
           }
 
@@ -3948,7 +3972,7 @@ export default function MarketTerminal() {
             symbol: normSymbol,
             side: side,
             type: "MARKET",
-            quantity: parseFloat(qtyNum.toFixed(6)),
+            quantity: qtyToSend,
             isLive: true,
             openShort: attemptingOpenShort && allowLiveShorts,
           };
@@ -4015,8 +4039,14 @@ export default function MarketTerminal() {
           addLog("BINANCE", side, `Transmitting Crypto Order to Binance: ${side} ${qtyNum} ${normSymbol} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
           try {
             // buying-power check for manual crypto orders (Binance) — prefer futures USDT via server
-            const estPrice = curRef.alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
-            const intendedCost = estPrice * parseFloat(qtyNum.toFixed(6));
+            const estPrice = alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
+            const maxCryptoBuyUsd = 100;
+            let qtyToSend = parseFloat(qtyNum.toFixed(6));
+            if (side === "BUY" && (qtyToSend * estPrice) > maxCryptoBuyUsd) {
+              qtyToSend = parseFloat((maxCryptoBuyUsd / Math.max(estPrice, 0.0000001)).toFixed(6));
+              addLog(normSymbol, "BUY_RESIZED", `Manual crypto BUY capped to ~$${maxCryptoBuyUsd.toFixed(2)} by policy.`, "INFO");
+            }
+            const intendedCost = estPrice * qtyToSend;
             let maxSafeOrderVal = 0;
             try {
               const prefRes = await fetch('/api/binance/preferred-usdt');
@@ -4029,8 +4059,8 @@ export default function MarketTerminal() {
               // ignore
             }
             if (maxSafeOrderVal <= 0) {
-              const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-              const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+              const cashValue = parseFloat(alpacaAccount?.cash || "0");
+              const rawBuyingPower = parseFloat(alpacaAccount?.buying_power || "0");
               const isFractional = qtyNum % 1 !== 0;
               const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
               maxSafeOrderVal = maxAllowedPower * 0.7;
@@ -4038,7 +4068,7 @@ export default function MarketTerminal() {
             if (intendedCost > maxSafeOrderVal) {
               setIsPlacingOrder(false);
               setOrderError(`Blocked: insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`);
-              addLog(normSymbol, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`);
+              addLog(normSymbol, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`, "WARNING");
               return;
             }
 
@@ -4046,7 +4076,7 @@ export default function MarketTerminal() {
               symbol: normSymbol,
               side: side,
               type: "MARKET",
-              quantity: parseFloat(qtyNum.toFixed(6)),
+              quantity: qtyToSend,
               isLive: true,
               openShort: attemptingOpenShort && allowLiveShorts,
             };

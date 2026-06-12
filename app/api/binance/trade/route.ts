@@ -2,9 +2,21 @@ import { NextResponse } from "next/server";
 import crypto from "crypto";
 
 export const dynamic = "force-dynamic";
+const MAX_CRYPTO_BUY_NOTIONAL_USD = 100;
 
 function sign(query: string, secret: string) {
   return crypto.createHmac("sha256", secret).update(query).digest("hex");
+}
+
+function floorToStep(value: number, decimals: number) {
+  const factor = 10 ** decimals;
+  return Math.floor(value * factor) / factor;
+}
+
+function getQtyDecimals(symbol: string) {
+  // Conservative defaults for common perpetual pairs.
+  if (symbol.startsWith("BTC") || symbol.startsWith("ETH")) return 3;
+  return 2;
 }
 
 async function safeParse(req: Request) {
@@ -21,8 +33,16 @@ export async function POST(req: Request) {
   try {
     const body: any = await safeParse(req);
 
-    const apiKey = process.env.BINANCE_LIVE_API_KEY || body.apiKey;
-    const apiSecret = process.env.BINANCE_LIVE_API_SECRET || body.apiSecret;
+    const apiKey =
+      process.env.BINANCE_LIVE_API_KEY ||
+      process.env.BINANCE_KEY ||
+      process.env.EXCH_BINANCE_KEY ||
+      body.apiKey;
+    const apiSecret =
+      process.env.BINANCE_LIVE_API_SECRET ||
+      process.env.BINANCE_SECRET ||
+      process.env.EXCH_BINANCE_SECRET ||
+      body.apiSecret;
     const isLive = body.isLive === true || body.isLive === "true";
 
     // Expected payload for live order: { symbol, side: 'BUY'|'SELL', type?: 'MARKET'|'LIMIT', quantity }
@@ -30,9 +50,13 @@ export async function POST(req: Request) {
     const side = (body.side || "BUY").toUpperCase();
     const type = (body.type || "MARKET").toUpperCase();
     const quantity = body.quantity || body.qty || body.amount;
+    const requestedQty = parseFloat(String(quantity || 0));
 
     if (!symbol) return NextResponse.json({ error: "Missing symbol" }, { status: 200 });
     if (!quantity) return NextResponse.json({ error: "Missing quantity" }, { status: 200 });
+    if (!Number.isFinite(requestedQty) || requestedQty <= 0) {
+      return NextResponse.json({ error: "Quantity must be greater than zero." }, { status: 200 });
+    }
 
     // Normalize symbol: convert ETHUSD → ETHUSDT for Binance Futures
     if (symbol.endsWith("USD") && !symbol.endsWith("USDT")) {
@@ -59,9 +83,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "BINANCE API credentials missing on server." }, { status: 200 });
     }
 
-    // Prefer futures USDT balance when deciding buying power. Attempt to query futures balance; if it fails, fall back to spot.
+    // Prefer futures USDT balance when deciding buying power. If futures has no usable USDT,
+    // fall back to spot balance and route order to spot.
     const BASE = process.env.BASE_URL || 'http://localhost:3000';
-    async function getPreferredUsdt() {
+    const getPreferredFunding = async (): Promise<{ usdt: number; source: "futures" | "spot" | "none" }> => {
       try {
         const res = await fetch(`${BASE}/api/binance/futures/account`);
         const txt = await res.text();
@@ -70,7 +95,7 @@ export async function POST(req: Request) {
         if (d && d.usdt && (d.usdt.free || d.usdt.balance)) {
           const val = parseFloat(d.usdt.free || d.usdt.balance || '0');
           console.log('✅ Futures USDT found:', val);
-          if (!isNaN(val)) return val;
+          if (!isNaN(val) && val > 0) return { usdt: val, source: "futures" };
         }
       } catch (e) {
         console.error('🔴 Futures fetch failed:', e);
@@ -86,7 +111,7 @@ export async function POST(req: Request) {
           if (usdt) {
             const val = parseFloat(usdt.free || usdt.balance || '0');
             console.log('✅ Spot USDT found:', val);
-            return val;
+            if (!isNaN(val) && val > 0) return { usdt: val, source: "spot" };
           }
         }
       } catch (e) {
@@ -94,14 +119,19 @@ export async function POST(req: Request) {
         // ignore
       }
       console.warn('⚠️ No USDT balance found anywhere');
-      return 0;
-    }
+      return { usdt: 0, source: "none" };
+    };
 
     // Build parameters for MARKET order on FUTURES: symbol, side, type=MARKET, quantity, timestamp
     // Server-side buying-power enforcement: fetch preferred USDT and current futures price to estimate cost
-    const preferredUsdt = await getPreferredUsdt();
+    const preferred = await getPreferredFunding();
+    const preferredUsdt = preferred.usdt;
+    const balanceSource = preferred.source;
     console.log(`💰 Preferred USDT balance: ${preferredUsdt}`);
+    console.log(`🏦 Balance source selected: ${balanceSource}`);
+    let executionVenue: "futures" | "spot" = balanceSource === "futures" ? "futures" : "spot";
     
+    let finalQty = requestedQty;
     if (side === 'BUY') {
       // If no preferred USDT is available at all, block immediate live BUYs to avoid accidental orders.
       if (!preferredUsdt || preferredUsdt <= 0) {
@@ -109,14 +139,23 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: `Insufficient USDT available (preferred balance=${preferredUsdt}). Refusing to place live BUY order.` }, { status: 200 });
       }
       try {
-        // Fetch futures mark price (not spot price)
-        const priceRes = await fetch(`https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`);
+        const priceUrl = executionVenue === "futures"
+          ? `https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`
+          : `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`;
+        const priceRes = await fetch(priceUrl);
         const priceTxt = await priceRes.text();
         const priceObj = JSON.parse(priceTxt || '{}');
-        const lastPrice = parseFloat(priceObj.lastPrice || priceObj.markPrice || '0');
-        const cost = lastPrice * parseFloat(String(quantity));
-        if (!isNaN(cost) && cost > preferredUsdt) {
-          return NextResponse.json({ error: `Insufficient preferred USDT balance (${preferredUsdt}) for requested BUY (~${cost.toFixed(2)} required).` }, { status: 200 });
+        const lastPrice = parseFloat(priceObj.lastPrice || priceObj.markPrice || priceObj.price || '0');
+        const cost = lastPrice * requestedQty;
+        const budgetCap = Math.min(preferredUsdt * 0.9, MAX_CRYPTO_BUY_NOTIONAL_USD);
+        if (!isNaN(cost) && cost > budgetCap) {
+          const qtyDecimals = getQtyDecimals(symbol);
+          const resizedQty = floorToStep(budgetCap / Math.max(lastPrice, 0.0000001), qtyDecimals);
+          if (!Number.isFinite(resizedQty) || resizedQty <= 0) {
+            return NextResponse.json({ error: `BUY blocked. Budget cap is ${budgetCap.toFixed(2)} USDT (preferred=${preferredUsdt.toFixed(2)}, hard cap=${MAX_CRYPTO_BUY_NOTIONAL_USD}). Requested ~${cost.toFixed(2)}.` }, { status: 200 });
+          }
+          finalQty = resizedQty;
+          console.warn(`⚠️ Auto-resized ${symbol} BUY from ${requestedQty} to ${finalQty} based on budget cap ${budgetCap.toFixed(2)} (preferred USDT ${preferredUsdt})`);
         }
       } catch (e) {
         // ignore price fetch error and continue — Binance will reject if insufficient
@@ -125,12 +164,12 @@ export async function POST(req: Request) {
 
     const params: any = { symbol, side, type };
     if (type === "MARKET") {
-      // Binance Futures expects 'quantity' for contract amount
-      params.quantity = quantity;
+      // Binance expects 'quantity' as base-asset amount for both spot/futures market orders.
+      params.quantity = finalQty;
     } else if (type === "LIMIT") {
       params.timeInForce = body.timeInForce || "GTC";
       params.price = body.price;
-      params.quantity = quantity;
+      params.quantity = finalQty;
     }
 
     params.timestamp = Date.now();
@@ -140,8 +179,10 @@ export async function POST(req: Request) {
     const queryString = qs.toString();
     const signature = sign(queryString, apiSecret);
 
-    // Use Binance FUTURES API endpoint, not spot
-    const res = await fetch(`https://fapi.binance.com/fapi/v1/order?${queryString}&signature=${signature}`, {
+    const orderUrl = executionVenue === "futures"
+      ? `https://fapi.binance.com/fapi/v1/order?${queryString}&signature=${signature}`
+      : `https://api.binance.com/api/v3/order?${queryString}&signature=${signature}`;
+    const res = await fetch(orderUrl, {
       method: 'POST',
       headers: {
         'X-MBX-APIKEY': apiKey,
@@ -158,7 +199,16 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: data?.msg || 'Binance order rejected', raw: data }, { status: 200 });
     }
 
-    return NextResponse.json({ order: data });
+    return NextResponse.json({
+      order: data,
+      submission_meta: {
+        requestedQty,
+        submittedQty: finalQty,
+        autoResized: finalQty !== requestedQty,
+        balanceSource,
+        executionVenue,
+      }
+    });
   } catch (err: any) {
     console.error('Binance trade proxy error', err);
     return NextResponse.json({ error: err?.message || 'Internal server error' }, { status: 200 });
