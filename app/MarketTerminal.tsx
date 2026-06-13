@@ -594,8 +594,15 @@ export default function MarketTerminal() {
   // Load persisted global TP/SL from localStorage on mount
   useEffect(() => {
     try {
+      const strategyStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotStrategy");
+      const targetStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotTargetTicker");
+      const autoStartStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotAutoStart");
+      const warnStored = typeof window !== "undefined" && localStorage.getItem("sentry:warnThreshold");
+      const criticalStored = typeof window !== "undefined" && localStorage.getItem("sentry:criticalThreshold");
       const tp = typeof window !== "undefined" && localStorage.getItem("sentry:globalTP");
       const sl = typeof window !== "undefined" && localStorage.getItem("sentry:globalSL");
+      const minAvgVolStored = typeof window !== "undefined" && localStorage.getItem("sentry:minAvgVol");
+      const maxExposureStored = typeof window !== "undefined" && localStorage.getItem("sentry:maxExposurePct");
       const minLiveQty = typeof window !== "undefined" && localStorage.getItem("sentry:liveMinQty");
       const minLiveCryptoQty = typeof window !== "undefined" && localStorage.getItem("sentry:liveMinCryptoQty");
       const maxConcurrentStored = typeof window !== "undefined" && localStorage.getItem("sentry:maxConcurrent");
@@ -603,8 +610,39 @@ export default function MarketTerminal() {
       const broadScan = typeof window !== "undefined" && localStorage.getItem("sentry:scanBroadUniverse");
       const cryptoOnlyStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotCryptoOnly");
       const blockedMarketsStored = typeof window !== "undefined" && localStorage.getItem("sentry:blockedMarkets");
+
+      if (strategyStored) {
+        const allowed = new Set(["SENTRY_HEAL", "GEMINI_AI", "SCALPER", "TOUCH_TURN", "MACD_FRONT_SIDE", "SNEAKY_PIVOT", "ELLIOTT_WAVE"]);
+        if (allowed.has(strategyStored)) {
+          setAutopilotStrategy(strategyStored as any);
+        }
+      }
+      if (targetStored) {
+        setAutopilotTargetTicker(targetStored.toUpperCase().trim());
+      }
+      if (autoStartStored) {
+        const enabled = autoStartStored === "true";
+        setAutopilotAutoStart(enabled);
+        if (enabled) setIsAutopilotActive(true);
+      }
+      if (warnStored) {
+        const n = parseFloat(warnStored);
+        if (Number.isFinite(n)) setWarnThreshold(Math.max(1, Math.min(99, n)));
+      }
+      if (criticalStored) {
+        const n = parseFloat(criticalStored);
+        if (Number.isFinite(n)) setCriticalThreshold(Math.max(1, Math.min(100, n)));
+      }
       if (tp) setGlobalTakeProfitPercent(Math.max(0, parseFloat(tp)));
       if (sl) setGlobalStopLossPercent(Math.max(0, parseFloat(sl)));
+      if (minAvgVolStored) {
+        const n = parseFloat(minAvgVolStored);
+        if (Number.isFinite(n)) setMinAvgVolume(Math.max(0, n));
+      }
+      if (maxExposureStored) {
+        const n = parseFloat(maxExposureStored);
+        if (Number.isFinite(n)) setMaxExposurePercentPerSymbol(Math.max(1, Math.min(100, n)));
+      }
       if (minLiveQty) setLiveMinOrderQty(Math.max(0.0001, parseFloat(minLiveQty)));
       if (minLiveCryptoQty) setLiveMinCryptoOrderQty(Math.max(0.000001, parseFloat(minLiveCryptoQty)));
       if (maxConcurrentStored) setMaxConcurrentPositions(Math.max(1, parseInt(maxConcurrentStored)));
@@ -640,6 +678,11 @@ export default function MarketTerminal() {
   useEffect(() => {
     try {
       if (typeof window !== "undefined") {
+        localStorage.setItem("sentry:autopilotStrategy", String(autopilotStrategy));
+        localStorage.setItem("sentry:autopilotTargetTicker", String(autopilotTargetTicker));
+        localStorage.setItem("sentry:autopilotAutoStart", String(autopilotAutoStart));
+        localStorage.setItem("sentry:warnThreshold", String(warnThreshold));
+        localStorage.setItem("sentry:criticalThreshold", String(criticalThreshold));
         localStorage.setItem("sentry:globalTP", String(globalTakeProfitPercent));
         localStorage.setItem("sentry:globalSL", String(globalStopLossPercent));
         localStorage.setItem("sentry:minAvgVol", String(minAvgVolume));
@@ -659,7 +702,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:positionsView", positionsView);
       }
     } catch (e) {}
-  }, [globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, autopilotCryptoOnly, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin]);
+  }, [autopilotStrategy, autopilotTargetTicker, autopilotAutoStart, warnThreshold, criticalThreshold, globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, autopilotCryptoOnly, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin]);
 
   // Automatic ET-based toggle: after Wall Street close (16:00 ET) prefer crypto-only autopilot,
   // and re-enable non-crypto before market open (9:30 ET). Skip automatic toggles on weekends.
@@ -1075,6 +1118,82 @@ export default function MarketTerminal() {
     if (!useAlpacaLive) return;
     setIsRefreshing(true);
     try {
+      const mergeBinanceSpotIntoPositions = async (basePositions: Position[]): Promise<Position[]> => {
+        try {
+          const binanceRes = await fetch("/api/binance/account", { cache: "no-store" });
+          const binanceText = await binanceRes.text();
+          let binanceData: any = null;
+          try {
+            binanceData = JSON.parse(binanceText);
+          } catch (e) {
+            return basePositions;
+          }
+
+          if (!binanceRes.ok || binanceData?.error || !Array.isArray(binanceData?.account?.balances)) {
+            return basePositions;
+          }
+
+          const stableAssets = new Set(["USDT", "USD", "USDC", "BUSD", "FDUSD", "TUSD", "USDP"]);
+          const nonZeroBalances = binanceData.account.balances.filter((b: any) => {
+            const asset = String(b?.asset || "").toUpperCase();
+            const qty = (parseFloat(String(b?.free || 0)) || 0) + (parseFloat(String(b?.locked || 0)) || 0);
+            return asset && !stableAssets.has(asset) && qty > 0;
+          });
+
+          if (nonZeroBalances.length === 0) {
+            return basePositions;
+          }
+
+          const derived = await Promise.all(nonZeroBalances.map(async (b: any) => {
+            const asset = String(b?.asset || "").toUpperCase();
+            const qty = (parseFloat(String(b?.free || 0)) || 0) + (parseFloat(String(b?.locked || 0)) || 0);
+            if (!asset || qty <= 0) return null;
+
+            let px = 0;
+            try {
+              const pRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${asset}USDT`, { cache: "no-store" });
+              const pText = await pRes.text();
+              const pJson = JSON.parse(pText || "{}");
+              px = parseFloat(String(pJson?.price || 0)) || 0;
+            } catch (e) {
+              px = 0;
+            }
+
+            if (!(px > 0)) return null;
+
+            const marketValue = qty * px;
+            return {
+              symbol: `${asset}USD`,
+              qty,
+              avg_entry_price: px,
+              current_price: px,
+              market_value: marketValue,
+              unrealized_pl: 0,
+              unrealized_plpc: 0,
+              maintenance_margin_rate: 0.5,
+            } as Position;
+          }));
+
+          const derivedPositions = derived.filter(Boolean) as Position[];
+          if (derivedPositions.length === 0) {
+            return basePositions;
+          }
+
+          const mergedBySymbol = new Map<string, Position>();
+          for (const p of basePositions || []) mergedBySymbol.set(String(p.symbol || "").toUpperCase(), p);
+          for (const p of derivedPositions) {
+            const key = String(p.symbol || "").toUpperCase();
+            if (!mergedBySymbol.has(key)) {
+              mergedBySymbol.set(key, p);
+            }
+          }
+
+          return Array.from(mergedBySymbol.values());
+        } catch (e) {
+          return basePositions;
+        }
+      };
+
       if (brokerType === "ANGELONE") {
         const response = await fetch("/api/angelone", {
           method: "POST",
@@ -1102,10 +1221,11 @@ export default function MarketTerminal() {
         }
 
         setAlpacaAccount(rawData.account);
-        setAlpacaPositions(rawData.positions);
+        const mergedPositions = await mergeBinanceSpotIntoPositions(rawData.positions || []);
+        setAlpacaPositions(mergedPositions);
         {
           const refreshedQtyBySymbol: Record<string, number> = {};
-          for (const p of (rawData.positions || [])) {
+          for (const p of (mergedPositions || [])) {
             const sym = String(p?.symbol || "").toUpperCase();
             if (!sym) continue;
             refreshedQtyBySymbol[sym] = Number(p?.qty || 0);
