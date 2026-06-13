@@ -1113,86 +1113,87 @@ export default function MarketTerminal() {
     };
   }, [getEstimatedCostBps]);
 
+  const mergeBinanceSpotIntoPositions = useCallback(async (basePositions: Position[]): Promise<Position[]> => {
+    try {
+      const binanceRes = await fetch("/api/binance/account", { cache: "no-store" });
+      const binanceText = await binanceRes.text();
+      let binanceData: any = null;
+      try {
+        binanceData = JSON.parse(binanceText);
+      } catch (e) {
+        return basePositions;
+      }
+
+      if (!binanceRes.ok || binanceData?.error || !Array.isArray(binanceData?.account?.balances)) {
+        return basePositions;
+      }
+
+      const stableAssets = new Set(["USDT", "USD", "USDC", "BUSD", "FDUSD", "TUSD", "USDP"]);
+      const nonZeroBalances = binanceData.account.balances.filter((b: any) => {
+        const asset = String(b?.asset || "").toUpperCase();
+        const qty = (parseFloat(String(b?.free || 0)) || 0) + (parseFloat(String(b?.locked || 0)) || 0);
+        return asset && !stableAssets.has(asset) && qty > 0;
+      });
+
+      if (nonZeroBalances.length === 0) {
+        return basePositions;
+      }
+
+      const derived = await Promise.all(nonZeroBalances.map(async (b: any) => {
+        const asset = String(b?.asset || "").toUpperCase();
+        const qty = (parseFloat(String(b?.free || 0)) || 0) + (parseFloat(String(b?.locked || 0)) || 0);
+        if (!asset || qty <= 0) return null;
+
+        let px = 0;
+        try {
+          const pRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${asset}USDT`, { cache: "no-store" });
+          const pText = await pRes.text();
+          const pJson = JSON.parse(pText || "{}");
+          px = parseFloat(String(pJson?.price || 0)) || 0;
+        } catch (e) {
+          px = 0;
+        }
+
+        if (!(px > 0)) return null;
+
+        const marketValue = qty * px;
+        return {
+          symbol: `${asset}USD`,
+          qty,
+          avg_entry_price: px,
+          current_price: px,
+          market_value: marketValue,
+          unrealized_pl: 0,
+          unrealized_plpc: 0,
+          maintenance_margin_rate: 0.5,
+        } as Position;
+      }));
+
+      const derivedPositions = derived.filter(Boolean) as Position[];
+      if (derivedPositions.length === 0) {
+        return basePositions;
+      }
+
+      const mergedBySymbol = new Map<string, Position>();
+      for (const p of basePositions || []) mergedBySymbol.set(String(p.symbol || "").toUpperCase(), p);
+      for (const p of derivedPositions) {
+        const key = String(p.symbol || "").toUpperCase();
+        if (!mergedBySymbol.has(key)) {
+          mergedBySymbol.set(key, p);
+        }
+      }
+
+      return Array.from(mergedBySymbol.values());
+    } catch (e) {
+      return basePositions;
+    }
+  }, []);
+
   // Refresh data proxy
   const handleRefreshData = useCallback(async () => {
     if (!useAlpacaLive) return;
     setIsRefreshing(true);
     try {
-      const mergeBinanceSpotIntoPositions = async (basePositions: Position[]): Promise<Position[]> => {
-        try {
-          const binanceRes = await fetch("/api/binance/account", { cache: "no-store" });
-          const binanceText = await binanceRes.text();
-          let binanceData: any = null;
-          try {
-            binanceData = JSON.parse(binanceText);
-          } catch (e) {
-            return basePositions;
-          }
-
-          if (!binanceRes.ok || binanceData?.error || !Array.isArray(binanceData?.account?.balances)) {
-            return basePositions;
-          }
-
-          const stableAssets = new Set(["USDT", "USD", "USDC", "BUSD", "FDUSD", "TUSD", "USDP"]);
-          const nonZeroBalances = binanceData.account.balances.filter((b: any) => {
-            const asset = String(b?.asset || "").toUpperCase();
-            const qty = (parseFloat(String(b?.free || 0)) || 0) + (parseFloat(String(b?.locked || 0)) || 0);
-            return asset && !stableAssets.has(asset) && qty > 0;
-          });
-
-          if (nonZeroBalances.length === 0) {
-            return basePositions;
-          }
-
-          const derived = await Promise.all(nonZeroBalances.map(async (b: any) => {
-            const asset = String(b?.asset || "").toUpperCase();
-            const qty = (parseFloat(String(b?.free || 0)) || 0) + (parseFloat(String(b?.locked || 0)) || 0);
-            if (!asset || qty <= 0) return null;
-
-            let px = 0;
-            try {
-              const pRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${asset}USDT`, { cache: "no-store" });
-              const pText = await pRes.text();
-              const pJson = JSON.parse(pText || "{}");
-              px = parseFloat(String(pJson?.price || 0)) || 0;
-            } catch (e) {
-              px = 0;
-            }
-
-            if (!(px > 0)) return null;
-
-            const marketValue = qty * px;
-            return {
-              symbol: `${asset}USD`,
-              qty,
-              avg_entry_price: px,
-              current_price: px,
-              market_value: marketValue,
-              unrealized_pl: 0,
-              unrealized_plpc: 0,
-              maintenance_margin_rate: 0.5,
-            } as Position;
-          }));
-
-          const derivedPositions = derived.filter(Boolean) as Position[];
-          if (derivedPositions.length === 0) {
-            return basePositions;
-          }
-
-          const mergedBySymbol = new Map<string, Position>();
-          for (const p of basePositions || []) mergedBySymbol.set(String(p.symbol || "").toUpperCase(), p);
-          for (const p of derivedPositions) {
-            const key = String(p.symbol || "").toUpperCase();
-            if (!mergedBySymbol.has(key)) {
-              mergedBySymbol.set(key, p);
-            }
-          }
-
-          return Array.from(mergedBySymbol.values());
-        } catch (e) {
-          return basePositions;
-        }
-      };
 
       if (brokerType === "ANGELONE") {
         const response = await fetch("/api/angelone", {
@@ -1282,10 +1283,11 @@ export default function MarketTerminal() {
         }
 
         setAlpacaAccount(rawData.account);
-        setAlpacaPositions(rawData.positions);
+        const mergedPositions = await mergeBinanceSpotIntoPositions(rawData.positions || []);
+        setAlpacaPositions(mergedPositions);
         {
           const refreshedQtyBySymbol: Record<string, number> = {};
-          for (const p of (rawData.positions || [])) {
+          for (const p of (mergedPositions || [])) {
             const sym = String(p?.symbol || "").toUpperCase();
             if (!sym) continue;
             refreshedQtyBySymbol[sym] = Number(p?.qty || 0);
@@ -1324,7 +1326,7 @@ export default function MarketTerminal() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [useAlpacaLive, brokerType, angelApiKey, angelClientCode, angelMpin, angelTotpSeed, apiKey, apiSecret, isPaper, angelUseServerCreds, addLog]);
+  }, [useAlpacaLive, brokerType, angelApiKey, angelClientCode, angelMpin, angelTotpSeed, apiKey, apiSecret, isPaper, angelUseServerCreds, addLog, mergeBinanceSpotIntoPositions]);
 
   // Stable state ref to bypass interval recreate throttling
   const stateRef = React.useRef<any>({
@@ -3878,7 +3880,7 @@ export default function MarketTerminal() {
             throw new Error(rawData?.error || "Failed stored key validation.");
           }
           setAlpacaAccount(rawData.account);
-          setAlpacaPositions(rawData.positions);
+          setAlpacaPositions(await mergeBinanceSpotIntoPositions(rawData.positions || []));
           setIsConnected(true);
           setUseAlpacaLive(true);
 
@@ -4077,7 +4079,7 @@ export default function MarketTerminal() {
     };
 
     initApp();
-  }, [addLog]);
+  }, [addLog, mergeBinanceSpotIntoPositions]);
 
   // (moved) addLog hoisted earlier
 
@@ -4114,7 +4116,7 @@ export default function MarketTerminal() {
         throw new Error(rawData?.error || "Failed key validation.");
       }
       setAlpacaAccount(rawData.account);
-      setAlpacaPositions(rawData.positions);
+      setAlpacaPositions(await mergeBinanceSpotIntoPositions(rawData.positions || []));
       setIsConnected(true);
       setUseAlpacaLive(true);
 
