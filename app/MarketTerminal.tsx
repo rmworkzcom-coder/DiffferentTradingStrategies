@@ -1091,6 +1091,18 @@ export default function MarketTerminal() {
     return isCryptoSymbol(symbol) ? 18 : 8;
   }, [isCryptoSymbol]);
 
+  // Calculate autopilot trade quantity based on broker type and symbol
+  const getAutopilotTradeQty = useCallback((symbol: string, isAlpaca: boolean) => {
+    const isCrypto = isCryptoSymbol(symbol);
+    if (isAlpaca) {
+      // Alpaca: stocks larger, crypto smaller
+      return symbol === "BTCUSD" ? 0.05 : isCrypto ? 0.02 : 10;
+    } else {
+      // Binance: crypto generally larger quantities in stablecoins
+      return symbol === "BTCUSD" ? 0.1 : isCrypto ? 0.5 : 10;
+    }
+  }, [isCryptoSymbol]);
+
   const ensureDailyGuardWindow = useCallback(() => {
     const dayKey = getEtDayKey();
     const current = autopilotDailyGuardRef.current;
@@ -2010,7 +2022,10 @@ export default function MarketTerminal() {
           const estPrice = curRef.alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
           let cryptoQtyToSend = finalQty;
           if (side === "BUY") {
-            const maxCryptoBuyUsd = 100;
+            const maxCryptoBuyUsd = Math.max(
+              100,
+              Math.min(parseFloat(curRef.alpacaAccount?.buying_power || "0"), parseFloat(curRef.alpacaAccount?.cash || "0")) * 0.2
+            );
             const cappedQty = parseFloat((maxCryptoBuyUsd / Math.max(estPrice, 0.0000001)).toFixed(6));
             if (cryptoQtyToSend * estPrice > maxCryptoBuyUsd) {
               cryptoQtyToSend = Math.max(cappedQty, 0);
@@ -2841,7 +2856,7 @@ export default function MarketTerminal() {
         const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
         const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
         const liveBudget = isLiveMode
-          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.05)
+          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.20)
           : 0;
         const liveMinQty = targetSymbol === "BTCUSD"
           ? Math.max(0.0001, Number(curRef.liveMinCryptoOrderQty) || 0.0001)
@@ -2874,9 +2889,8 @@ export default function MarketTerminal() {
           const slPct = Number(curRef.globalStopLossPercent || 5);
 
           if (pnlPct >= tpPct || pnlPct <= -slPct) {
-            const sellQty = targetSymbol === "BTCUSD"
-              ? Math.min(existingQty, 0.02)
-              : Math.min(existingQty, 5);
+            const baseQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
+            const sellQty = Math.min(existingQty, baseQty);
             const triggerLabel = pnlPct >= tpPct ? "TP" : "SL";
             addAutopilotLog(`Scalper ${triggerLabel} exit: ${targetSymbol} at ${pnlPct.toFixed(2)}% (entry ${existingEntry.toFixed(2)} -> now ${currentSpotPrice.toFixed(2)}). Attempting SELL ${sellQty}.`, "trade");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
@@ -2899,9 +2913,8 @@ export default function MarketTerminal() {
         } else if (randSeed < sellThreshold) {
           const exists = currentActivePositions.find((p) => p.symbol === targetSymbol);
           if (exists && exists.qty > 0) {
-            const sellQty = targetSymbol === "BTCUSD"
-              ? Math.min(exists.qty, isLiveMode ? Math.max(liveMinQty, 0.002) : 0.02)
-              : Math.min(exists.qty, isLiveMode ? Math.max(liveMinQty, 1) : 5);
+            const baseQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
+            const sellQty = Math.min(exists.qty, isLiveMode ? Math.max(liveMinQty, baseQty * 0.2) : baseQty);
             addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) hit local resistance spike. Attempting SELL order.`, "trade");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
             logScanOrderOutcome("SCALPER", orderOutcome);
@@ -3042,7 +3055,7 @@ export default function MarketTerminal() {
             if (formsEntry) {
               addAutopilotLog(`🎯 Range edge touched! Executing ${tState.side} entry order at ${curPrefix}${tState.limitPrice.toFixed(2)}.`, "trade");
               
-              const tradeQty = targetSymbol === "BTCUSD" ? 0.05 : 10;
+              const tradeQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
               await executeAutopilotOrder(targetSymbol, tState.side, tradeQty);
 
               const nextState = {
@@ -4444,7 +4457,12 @@ export default function MarketTerminal() {
         try {
           // buying-power check for manual crypto orders — prefer Binance futures USDT when available, fallback to local Alpaca buying power
           const estPrice = alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
-          const maxCryptoBuyUsd = 100;
+          const rawCashValue = parseFloat(alpacaAccount?.cash || "0");
+          const rawBuyingPowerValue = parseFloat(alpacaAccount?.buying_power || "0");
+          const maxCryptoBuyUsd = Math.max(
+            100,
+            Math.min(rawBuyingPowerValue > 0 ? rawBuyingPowerValue : rawCashValue, rawCashValue) * 0.15
+          );
           let qtyToSend = parseFloat(qtyNum.toFixed(6));
           if (side === "BUY" && (qtyToSend * estPrice) > maxCryptoBuyUsd) {
             qtyToSend = parseFloat((maxCryptoBuyUsd / Math.max(estPrice, 0.0000001)).toFixed(6));
@@ -4551,7 +4569,12 @@ export default function MarketTerminal() {
           try {
             // buying-power check for manual crypto orders (Binance) — prefer futures USDT via server
             const estPrice = alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
-            const maxCryptoBuyUsd = 100;
+            const rawCashValue = parseFloat(alpacaAccount?.cash || "0");
+            const rawBuyingPowerValue = parseFloat(alpacaAccount?.buying_power || "0");
+            const maxCryptoBuyUsd = Math.max(
+              100,
+              Math.min(rawBuyingPowerValue > 0 ? rawBuyingPowerValue : rawCashValue, rawCashValue) * 0.15
+            );
             let qtyToSend = parseFloat(qtyNum.toFixed(6));
             if (side === "BUY" && (qtyToSend * estPrice) > maxCryptoBuyUsd) {
               qtyToSend = parseFloat((maxCryptoBuyUsd / Math.max(estPrice, 0.0000001)).toFixed(6));
