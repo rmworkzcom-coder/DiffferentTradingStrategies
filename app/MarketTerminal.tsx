@@ -308,7 +308,7 @@ export default function MarketTerminal() {
   const [showApiSecret, setShowApiSecret] = useState(false);
   const [isPaper, setIsPaper] = useState(true);
   const [useAlpacaLive, setUseAlpacaLive] = useState(false);
-  const [allowLiveShorts, setAllowLiveShorts] = useState(false);
+  const [allowLiveShorts, setAllowLiveShorts] = useState(true);
   const [positionsView, setPositionsView] = useState<'ALL' | 'LONGS' | 'SHORTS'>('ALL');
 
   // Angel One (SmartAPI Indian Market) Configuration
@@ -565,13 +565,14 @@ export default function MarketTerminal() {
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
   const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(50); // percent of portfolio per symbol
-  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(10); // concurrent open positions
+  const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(5); // concurrent open positions
   const [maxConcurrentCryptoPositions, setMaxConcurrentCryptoPositions] = useState<number>(3); // concurrent open crypto positions
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
   const [liquidationBeforeCloseMin, setLiquidationBeforeCloseMin] = useState<number>(5);
   const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum non-crypto live order size
   const [liveMinCryptoOrderQty, setLiveMinCryptoOrderQty] = useState<number>(0.0001); // minimum crypto live order size
   const [aggressiveDeleverage, setAggressiveDeleverage] = useState<boolean>(false);
+  const [hasLoadedPersistentSettings, setHasLoadedPersistentSettings] = useState<boolean>(false);
 
   const addAutopilotLog = useCallback((msg: string, type: "info" | "success" | "warn" | "trade") => {
     setAutopilotLogs((prev) => {
@@ -608,6 +609,10 @@ export default function MarketTerminal() {
       const broadScan = typeof window !== "undefined" && localStorage.getItem("sentry:scanBroadUniverse");
       const cryptoOnlyStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotCryptoOnly");
       const blockedMarketsStored = typeof window !== "undefined" && localStorage.getItem("sentry:blockedMarkets");
+      const lossGuardStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotLossGuard");
+      const tradeFormTabStored = typeof window !== "undefined" && localStorage.getItem("sentry:tradeFormTab");
+      const tickStreamStored = typeof window !== "undefined" && localStorage.getItem("sentry:isTickStreamActive");
+      const blacklistStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotBlacklist");
 
       if (strategyStored) {
         const allowed = new Set(["SENTRY_HEAL", "GEMINI_AI", "SCALPER", "TOUCH_TURN", "MACD_FRONT_SIDE", "SNEAKY_PIVOT", "ELLIOTT_WAVE"]);
@@ -655,6 +660,17 @@ export default function MarketTerminal() {
       const liquidationMinStored = typeof window !== "undefined" && localStorage.getItem("sentry:liquidationBeforeCloseMin");
       if (autoLiquidateStored) setAutoLiquidateBeforeClose(autoLiquidateStored === "true");
       if (liquidationMinStored) setLiquidationBeforeCloseMin(Math.max(1, parseInt(liquidationMinStored)));
+      if (lossGuardStored) setAutopilotLossGuard(lossGuardStored === "true");
+      if (tradeFormTabStored && (tradeFormTabStored === "manual" || tradeFormTabStored === "autopilot")) setTradeFormTab(tradeFormTabStored as any);
+      if (tickStreamStored) setIsTickStreamActive(tickStreamStored === "true");
+      if (blacklistStored) {
+        try {
+          const parsed = JSON.parse(blacklistStored);
+          if (Array.isArray(parsed)) {
+            setAutopilotBlacklist(parsed.filter((item) => typeof item === "string"));
+          }
+        } catch (e) {}
+      }
       if (broadScan) setAutopilotScanBroadUniverse(broadScan === "true");
       if (cryptoOnlyStored) setAutopilotCryptoOnly(cryptoOnlyStored === "true");
       if (blockedMarketsStored) {
@@ -664,8 +680,10 @@ export default function MarketTerminal() {
       if (autoSwitchRaw) setAutopilotAutoSwitchEnabled(autoSwitchRaw === "true");
       const savedInterval = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotInterval");
       if (savedInterval) setAutopilotInterval(Math.max(1, parseInt(savedInterval)));
+      setHasLoadedPersistentSettings(true);
     } catch (e) {
       // ignore
+      setHasLoadedPersistentSettings(true);
     }
   }, [addAutopilotLog, addLog]);
 
@@ -680,6 +698,7 @@ export default function MarketTerminal() {
 
   // Persist TP/SL whenever they change
   useEffect(() => {
+    if (!hasLoadedPersistentSettings) return;
     try {
       if (typeof window !== "undefined") {
         localStorage.setItem("sentry:autopilotStrategy", String(autopilotStrategy));
@@ -704,9 +723,13 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:blockedMarkets", JSON.stringify(blockedMarkets));
         localStorage.setItem("sentry:allowLiveShorts", String(allowLiveShorts));
         localStorage.setItem("sentry:positionsView", positionsView);
+        localStorage.setItem("sentry:autopilotLossGuard", String(autopilotLossGuard));
+        localStorage.setItem("sentry:autopilotBlacklist", JSON.stringify(autopilotBlacklist));
+        localStorage.setItem("sentry:tradeFormTab", tradeFormTab);
+        localStorage.setItem("sentry:isTickStreamActive", String(isTickStreamActive));
       }
     } catch (e) {}
-  }, [autopilotStrategy, autopilotTargetTicker, autopilotAutoStart, warnThreshold, criticalThreshold, globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, autopilotCryptoOnly, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin]);
+  }, [hasLoadedPersistentSettings, autopilotStrategy, autopilotTargetTicker, autopilotAutoStart, warnThreshold, criticalThreshold, globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, autopilotCryptoOnly, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin, autopilotLossGuard, autopilotBlacklist, tradeFormTab, isTickStreamActive]);
 
   // Automatic ET-based toggle: after Wall Street close (16:00 ET) prefer crypto-only autopilot,
   // and re-enable non-crypto before market open (9:30 ET). Skip automatic toggles on weekends.
@@ -1874,7 +1897,7 @@ export default function MarketTerminal() {
 
             addAutopilotLog(`Live shorting allowed by config: attempting short ${qtyNum} ${symbolClean}.`, "info");
           }
-          if (finalQty > ownedQty) {
+          if (ownedQty > 0 && finalQty > ownedQty) {
             addAutopilotLog(`Leverage Control: Capping automated live SmartAPI SELL from ${qtyNum} to owned size ${ownedQty}.`, "info");
             finalQty = ownedQty;
           }
@@ -1968,7 +1991,7 @@ export default function MarketTerminal() {
             addAutopilotLog(`Live shorting allowed by config: attempting short ${qtyNum} ${symbolClean}.`, "info");
             addLog(symbolClean, "AUTO_SELL_ALLOWED", `Live short allowed by config; proceeding to submit SELL ${qtyNum}.`, "INFO");
           }
-          if (finalQty > ownedQty) {
+          if (ownedQty > 0 && finalQty > ownedQty) {
             addAutopilotLog(`Leverage Control: Capping automated live SELL of ${symbolClean} from ${qtyNum} to owned size ${ownedQty} to prevent unauthorized short-selling.`, "info");
             finalQty = ownedQty;
           }
