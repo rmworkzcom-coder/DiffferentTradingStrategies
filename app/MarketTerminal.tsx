@@ -457,8 +457,6 @@ export default function MarketTerminal() {
   }, []);
 
   useEffect(() => {
-    if (!useAlpacaLive) return;
-
     let mounted = true;
     const refresh = async () => {
       const snap = await fetchBinanceFundingSnapshot();
@@ -474,7 +472,7 @@ export default function MarketTerminal() {
       mounted = false;
       clearInterval(t);
     };
-  }, [useAlpacaLive, fetchBinanceFundingSnapshot]);
+  }, [fetchBinanceFundingSnapshot]);
 
   // --- SENTRY AUTOPILOT STATE VARIABLES & ENGINES ---
   const [isAutopilotActive, setIsAutopilotActive] = useState(false);
@@ -566,7 +564,7 @@ export default function MarketTerminal() {
 
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
-  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(30); // percent of portfolio per symbol
+  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(50); // percent of portfolio per symbol
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(10); // concurrent open positions
   const [maxConcurrentCryptoPositions, setMaxConcurrentCryptoPositions] = useState<number>(3); // concurrent open crypto positions
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
@@ -645,8 +643,14 @@ export default function MarketTerminal() {
       }
       if (minLiveQty) setLiveMinOrderQty(Math.max(0.0001, parseFloat(minLiveQty)));
       if (minLiveCryptoQty) setLiveMinCryptoOrderQty(Math.max(0.000001, parseFloat(minLiveCryptoQty)));
-      if (maxConcurrentStored) setMaxConcurrentPositions(Math.max(1, parseInt(maxConcurrentStored)));
-      if (maxConcurrentCryptoStored) setMaxConcurrentCryptoPositions(Math.max(1, parseInt(maxConcurrentCryptoStored)));
+      if (maxConcurrentStored !== null && maxConcurrentStored !== false) {
+        const val = parseInt(maxConcurrentStored as string);
+        if (Number.isFinite(val)) setMaxConcurrentPositions(Math.max(1, val));
+      }
+      if (maxConcurrentCryptoStored !== null && maxConcurrentCryptoStored !== false) {
+        const val = parseInt(maxConcurrentCryptoStored as string);
+        if (Number.isFinite(val)) setMaxConcurrentCryptoPositions(Math.max(1, val));
+      }
       const autoLiquidateStored = typeof window !== "undefined" && localStorage.getItem("sentry:autoLiquidateBeforeClose");
       const liquidationMinStored = typeof window !== "undefined" && localStorage.getItem("sentry:liquidationBeforeCloseMin");
       if (autoLiquidateStored) setAutoLiquidateBeforeClose(autoLiquidateStored === "true");
@@ -1885,7 +1889,7 @@ export default function MarketTerminal() {
           const isFractional = qtyNum % 1 !== 0;
           // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
           const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
-          const maxSafeOrderVal = maxAllowedPower * 0.70; // enforce a 30% safety collar/buffer for fractional buy orders
+          const maxSafeOrderVal = maxAllowedPower * 0.80; // enforce a 20% safety collar/buffer for fractional buy orders
 
           if (estimatedCost > maxSafeOrderVal) {
             const maxAffordableQty = maxSafeOrderVal / estPrice;
@@ -3734,6 +3738,14 @@ export default function MarketTerminal() {
     };
   }, [useAlpacaLive, lastAutopilotOrderOutcome, handleRefreshData]);
 
+  useEffect(() => {
+    if (!useAlpacaLive) return;
+    const intervalId = setInterval(() => {
+      handleRefreshData();
+    }, 45000);
+    return () => clearInterval(intervalId);
+  }, [useAlpacaLive, handleRefreshData]);
+
   // Autopilot loop trigger
   useEffect(() => {
     let intervalId: NodeJS.Timeout | null = null;
@@ -4084,7 +4096,7 @@ export default function MarketTerminal() {
   // (moved) addLog hoisted earlier
 
   // Connect & fetch from Alpaca
-  const handleConnectAlpaca = async () => {
+  const handleConnectAlpaca = async (): Promise<boolean> => {
     setIsConnecting(true);
     addLog("ALPACA", "CONNECT_ATTEMPT", `Attempting connection to Alpaca ${isPaper ? "Paper" : "Live"} API...`, "INFO");
 
@@ -4102,7 +4114,6 @@ export default function MarketTerminal() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-
 
       const resText = await response.text();
       let rawData: any = null;
@@ -4132,6 +4143,7 @@ export default function MarketTerminal() {
         `Securely connected! Account: ${rawData.account.account_number}. Cash: $${parseFloat(rawData.account.cash).toLocaleString()}`,
         "SUCCESS"
       );
+      return true;
     } catch (err: any) {
       console.error(err);
       setIsConnected(false);
@@ -4139,6 +4151,7 @@ export default function MarketTerminal() {
       localStorage.setItem("APCA_USE_ALPACA", "false");
       addLog("ALPACA", "CONNECT_FAILED", err.message || "Broker authentication failed. Reverted to Simulator.", "CRITICAL");
       showToast(`Alpaca Connection Error: ${err.message || "Unable to authorize. Please double check credentials."}`, "CRITICAL");
+      return false;
     } finally {
       setIsConnecting(false);
     }
@@ -4151,6 +4164,16 @@ export default function MarketTerminal() {
     setAlpacaAccount(null);
     localStorage.setItem("APCA_USE_ALPACA", "false");
     addLog("ALPACA", "DISCONNECT", "Switched back to Local Risk Simulator mode.", "INFO");
+  };
+
+  const handleStartAutopilot = async () => {
+    if (!useAlpacaLive) {
+      const connected = await handleConnectAlpaca();
+      if (!connected) {
+        showToast("Live Alpaca connection failed; starting simulator autopilot instead.", "WARNING");
+      }
+    }
+    setIsAutopilotActive(true);
   };
 
   // Test live connection without persisting or switching modes
