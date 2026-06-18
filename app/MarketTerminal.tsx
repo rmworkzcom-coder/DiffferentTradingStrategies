@@ -976,6 +976,9 @@ export default function MarketTerminal() {
   const [lastAutopilotOrderOutcome, setLastAutopilotOrderOutcome] = useState<AutopilotOrderResult | null>(null);
   const [autopilotLastScanAtMs, setAutopilotLastScanAtMs] = useState<number | null>(null);
   const [autopilotNextScanInSec, setAutopilotNextScanInSec] = useState<number | null>(null);
+  const [autopilotCurrentScanTarget, setAutopilotCurrentScanTarget] = useState<string | null>(null);
+  const [autopilotScanError, setAutopilotScanError] = useState<string | null>(null);
+  const [autopilotScanErrorCount, setAutopilotScanErrorCount] = useState<number>(0);
   const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
   // Derived counts
   const coinCount = useMemo(() => {
@@ -1054,6 +1057,34 @@ export default function MarketTerminal() {
     if (explicit.includes(u)) return true;
     return false;
   }, []);
+
+  const autopilotScanList = useMemo(() => {
+    const parsedTargets = (autopilotTargetTicker || "AAPL")
+      .split(/[\s,]+/)
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+    const blacklistSet = new Set((autopilotBlacklist || []).map((s) => s.toUpperCase()));
+    const broadUniverseTargets = autopilotScanBroadUniverse ? quickTickers.map((s) => s.toUpperCase()) : [];
+    const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
+    const nowTs = Date.now();
+    const isLossGuardTemporarilyBlocked = (sym: string) => (autopilotLossGuardBlockedUntilRef.current[sym] || 0) > nowTs;
+
+    let scanTargets = baseTargets.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
+    const marketSessionNow = getMarketSessionET();
+    if (marketSessionNow === "CLOSED") {
+      scanTargets = scanTargets.filter((sym) => isCryptoSymbol(sym));
+    }
+
+    if (scanTargets.length === 0) {
+      const dynamicPool = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...quickTickers.map((s) => s.toUpperCase())]));
+      scanTargets = dynamicPool.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
+      if (marketSessionNow === "CLOSED") {
+        scanTargets = scanTargets.filter((sym) => isCryptoSymbol(sym));
+      }
+    }
+
+    return scanTargets;
+  }, [autopilotTargetTicker, autopilotScanBroadUniverse, autopilotBlacklist, quickTickers, isCryptoSymbol]);
 
   const computeOpenCounts = useCallback((positions: any[]) => {
     const all = (positions || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
@@ -2044,8 +2075,20 @@ export default function MarketTerminal() {
           const prefSource = pref.source === "futures" ? "futures" : "none";
           preferredUsdt = prefSource === "futures" ? prefUsdt : 0;
           preferredSource = prefSource;
+          if (prefSource !== "futures") {
+            addAutopilotLog(`Blocked ${symbolClean}: Binance futures USDT funding required. Current source = ${pref.source}.`, "warn");
+            return {
+              status: "BLOCKED",
+              code: "BLOCKED_INSUFFICIENT_USDT",
+              symbol: symbolClean,
+              side,
+              requestedQty: qtyNum,
+              executedQty: 0,
+              message: `Binance futures USDT funding required. Current source = ${pref.source}.`,
+            };
+          }
           // Only prefer Binance futures funding when the USDT balance is actually large enough to support a crypto order.
-          if (prefSource === "futures" && prefUsdt >= 50) {
+          if (prefUsdt >= 50) {
             maxSafeOrderVal = prefUsdt * 0.9; // keep 10% buffer
           }
 
@@ -2689,6 +2732,14 @@ export default function MarketTerminal() {
       return prev;
     });
 
+    if ((outcome.status === "BLOCKED" || outcome.status === "REJECTED") && outcome.side === "BUY" && outcome.symbol === autopilotCurrentScanTarget) {
+      setAutopilotScanError(`Scan failed for ${outcome.symbol}: ${outcome.message}`);
+      setAutopilotScanErrorCount((prev) => prev + 1);
+    } else if (outcome.symbol === autopilotCurrentScanTarget && (outcome.status === "FILLED" || outcome.status === "PENDING")) {
+      setAutopilotScanError(null);
+      setAutopilotScanErrorCount(0);
+    }
+
     if (isError) lastErrorOutcomeAtRef.current = now;
 
     const qtyText = outcome.executedQty > 0 ? outcome.executedQty : outcome.requestedQty;
@@ -2701,7 +2752,7 @@ export default function MarketTerminal() {
     } else {
       addAutopilotLog(`${source}: ${outcome.status} ${outcome.side} ${outcome.requestedQty} ${outcome.symbol} (${outcome.code}) - ${outcome.message}`, "warn");
     }
-  }, [addAutopilotLog, ERROR_OUTCOME_STICKY_MS]);
+  }, [addAutopilotLog, ERROR_OUTCOME_STICKY_MS, autopilotCurrentScanTarget]);
 
   // Immediate deleverage command callable from UI
   const performDeleverage = useCallback(async () => {
@@ -2800,18 +2851,26 @@ export default function MarketTerminal() {
       }
 
       if (scanTargets.length === 0) {
+        setAutopilotCurrentScanTarget(null);
+        setAutopilotScanError("No eligible scan targets are available right now.");
+        setAutopilotScanErrorCount(0);
         addAutopilotLog("Autopilot scan skipped: market session is CLOSED and no crypto symbols are eligible.", "info");
         return;
       }
+
       const targetIdx = autopilotTargetSymbolIndexRef.current % scanTargets.length;
-      const targetSymbol = scanTargets[targetIdx];
+      const orderedScanTargets = [...scanTargets.slice(targetIdx), ...scanTargets.slice(0, targetIdx)];
       autopilotTargetSymbolIndexRef.current = (targetIdx + 1) % scanTargets.length;
+      setAutopilotScanError(null);
+      setAutopilotScanErrorCount(0);
 
-      const matchedForStats = currentActivePositions.find((p) => p.symbol === targetSymbol);
-      const scanPrice = matchedForStats?.current_price || (targetSymbol === "BTCUSD" ? 67200.0 : targetSymbol === "ETHUSD" ? 3800.0 : 150.0);
-      recordMarketStat(targetSymbol, scanPrice);
+      for (const targetSymbol of orderedScanTargets) {
+        setAutopilotCurrentScanTarget(targetSymbol);
+        const matchedForStats = currentActivePositions.find((p) => p.symbol === targetSymbol);
+        const scanPrice = matchedForStats?.current_price || (targetSymbol === "BTCUSD" ? 67200.0 : targetSymbol === "ETHUSD" ? 3800.0 : 150.0);
+        recordMarketStat(targetSymbol, scanPrice);
 
-      if (curRef.autopilotStrategy === "SENTRY_HEAL") {
+        if (curRef.autopilotStrategy === "SENTRY_HEAL") {
         if (currentCapacity >= curRef.warnThreshold) {
           if (sentryHealthStateRef.current !== "warning") {
             addAutopilotLog(`⚠️ Hazard: Over-allocation! Margin ${currentCapacity.toFixed(1)}% exceeds alert threshold ${curRef.warnThreshold}%. Triggering AutoDeleverage defender...`, "warn");
@@ -2874,7 +2933,7 @@ export default function MarketTerminal() {
 
         if (hasPendingSeedBuy) {
           addAutopilotLog(`Scalper bootstrap paused for ${targetSymbol}: previous BUY is still pending broker fill confirmation.`, "info");
-          return;
+          continue;
         }
         if (!existingScalperPos || existingScalperPos.qty <= 0) {
           const seedQty = isLiveMode
@@ -2883,7 +2942,7 @@ export default function MarketTerminal() {
           addAutopilotLog(`Scalper bootstrap: no active ${targetSymbol} position found. Attempting seed BUY ${seedQty}.`, "trade");
           const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", seedQty);
           logScanOrderOutcome("SCALPER", orderOutcome);
-          return;
+          continue;
         }
 
         // Deterministic exits: if a live position breaches global TP/SL bounds, exit first.
@@ -2901,7 +2960,7 @@ export default function MarketTerminal() {
             addAutopilotLog(`Scalper ${triggerLabel} exit: ${targetSymbol} at ${pnlPct.toFixed(2)}% (entry ${existingEntry.toFixed(2)} -> now ${currentSpotPrice.toFixed(2)}). Attempting SELL ${sellQty}.`, "trade");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
             logScanOrderOutcome("SCALPER", orderOutcome);
-            return;
+            continue;
           }
         }
 
@@ -3736,10 +3795,11 @@ export default function MarketTerminal() {
           addAutopilotLog(`🤖 AI Decision: HOLD recommended for ${targetSymbol}. Reason: "${data.reason}"`, "success");
         }
       }
-    } catch (err: any) {
-      console.error(err);
-      addAutopilotLog(`Scan tick interrupted: ${err.message || err}`, "warn");
-    } finally {
+    }
+  } catch (err: any) {
+    console.error(err);
+    addAutopilotLog(`Scan tick interrupted: ${err.message || err}`, "warn");
+  } finally {
       setIsAutopilotRunning(false);
     }
   }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, setElliottState, addAutopilotLog, logScanOrderOutcome, quickTickers, autopilotInterval, autopilotScanBroadUniverse, recordMarketStat]);
@@ -4483,7 +4543,19 @@ export default function MarketTerminal() {
           const prefSource = pref.source === "futures" ? "futures" : "none";
           preferredUsdt = prefSource === "futures" ? prefUsdt : 0;
           preferredSource = prefSource;
-          if (prefSource === "futures" && prefUsdt > 0) {
+          if (prefSource !== "futures") {
+            addAutopilotLog(`Blocked ${symbolClean}: Binance futures USDT funding required. Current source = ${pref.source}.`, "warn");
+            return {
+              status: "BLOCKED",
+              code: "BLOCKED_INSUFFICIENT_USDT",
+              symbol: symbolClean,
+              side,
+              requestedQty: qtyNum,
+              executedQty: 0,
+              message: `Binance futures USDT funding required. Current source = ${pref.source}.`,
+            };
+          }
+          if (prefUsdt > 0) {
             maxSafeOrderVal = prefUsdt * 0.9; // keep 10% buffer
           }
 
@@ -7131,6 +7203,53 @@ if __name__ == "__main__":
                       </div>
                       <p className="text-[9px] text-gray-500 mt-1">Autopilot will force-exit positions at or below this loss percent.</p>
                     </div>
+                  </div>
+
+                  <div className="rounded-xl border border-brand-border/40 bg-zinc-950/40 p-3 mt-3 text-white" id="autopilot-scan-list-card">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10px] uppercase tracking-[0.3em] text-gray-400 font-semibold font-mono">Active Scan Universe</span>
+                      <span className="text-[11px] text-sky-300 font-semibold font-mono">{autopilotScanList.length} symbols</span>
+                    </div>
+                    {autopilotCurrentScanTarget ? (
+                      <div className="mb-2 rounded-xl border border-sky-500/20 bg-sky-950/10 px-3 py-2 text-[11px] text-sky-200">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="font-semibold text-white">Scanning now</div>
+                            <div className="mt-1 text-gray-300">Current high-priority target: <span className="font-bold text-white">{autopilotCurrentScanTarget}</span></div>
+                          </div>
+                          {autopilotScanErrorCount > 0 && (
+                            <div className="rounded-full bg-yellow-500/20 text-yellow-100 text-[10px] uppercase tracking-[0.2em] px-2 py-1 font-semibold">
+                              {autopilotScanErrorCount} failed
+                            </div>
+                          )}
+                        </div>
+                        <div className="mt-2 text-[10px] text-gray-400">
+                          Last scan: {autopilotLastScanAtMs ? new Date(autopilotLastScanAtMs).toLocaleTimeString() : "waiting..."}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mb-2 text-[10px] text-gray-500">Autopilot is idle or awaiting the next scan cycle.</div>
+                    )}
+                    {autopilotScanError && (
+                      <div className="mb-3 rounded-xl border border-red-500/40 bg-red-950/20 p-3 text-[10px] text-red-200">
+                        <div className="font-semibold text-red-100">Highest priority buy failed</div>
+                        <div>{autopilotScanError}</div>
+                      </div>
+                    )}
+                    {autopilotScanList.length > 0 ? (
+                      <div className="flex flex-wrap gap-2">
+                        {autopilotScanList.map((symbol) => (
+                          <span
+                            key={symbol}
+                            className={`px-2 py-1 rounded-full border text-[11px] font-semibold font-mono ${symbol === autopilotCurrentScanTarget ? "bg-sky-500/20 border-sky-400 text-sky-100" : "bg-brand-bg/70 border-brand-border text-gray-200"}`}
+                          >
+                            {symbol}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-[10px] text-gray-500">No symbols are currently being scanned. Activate autopilot or adjust your target/universe settings.</p>
+                    )}
                   </div>
 
                   {/* Risk & diversification controls */}
