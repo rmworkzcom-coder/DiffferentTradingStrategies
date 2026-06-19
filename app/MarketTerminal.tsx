@@ -307,7 +307,7 @@ export default function MarketTerminal() {
   const [apiSecret, setApiSecret] = useState("");
   const [showApiSecret, setShowApiSecret] = useState(false);
   const [isPaper, setIsPaper] = useState(true);
-  const [useAlpacaLive, setUseAlpacaLive] = useState(false);
+  const [useAlpacaLive, setUseAlpacaLive] = useState(true);
   const [allowLiveShorts, setAllowLiveShorts] = useState(true);
   const [positionsView, setPositionsView] = useState<'ALL' | 'LONGS' | 'SHORTS'>('ALL');
   const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("manual");
@@ -555,8 +555,8 @@ export default function MarketTerminal() {
   }>>({});
 
   const [autopilotInterval, setAutopilotInterval] = useState(30); // in seconds (raised default to reduce API load and false signals)
-  // Global scanning master switch — default OFF to prevent accidental live scans
-  const [scanningEnabled, setScanningEnabled] = useState<boolean>(false);
+  // Global scanning master switch — user confirmed live trading; enable scanning by default
+  const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
   const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
   const [autopilotCryptoOnly, setAutopilotCryptoOnly] = useState<boolean>(false);
