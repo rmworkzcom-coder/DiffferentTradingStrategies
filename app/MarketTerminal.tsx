@@ -479,7 +479,7 @@ export default function MarketTerminal() {
   }, [fetchBinanceFundingSnapshot]);
 
   // --- SENTRY AUTOPILOT STATE VARIABLES & ENGINES ---
-  const [isAutopilotActive, setIsAutopilotActive] = useState(false);
+  const [isAutopilotActive, setIsAutopilotActive] = useState(true);
   const [autopilotAutoStart, setAutopilotAutoStart] = useState<boolean>(false);
   const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER" | "TOUCH_TURN" | "MACD_FRONT_SIDE" | "SNEAKY_PIVOT" | "ELLIOTT_WAVE">("SCALPER");
 
