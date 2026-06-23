@@ -280,8 +280,24 @@ export default function MarketTerminal() {
     const onError = (event: any) => {
       try {
         const id = `err-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-        const message = event?.message || (event?.reason && event.reason.message) || String(event);
-        const stack = event?.error?.stack || (event?.reason && event.reason.stack) || undefined;
+        let message = "Unknown error";
+        let stack: string | undefined;
+
+        if (event?.reason) {
+          if (typeof event.reason === "string") {
+            message = event.reason;
+          } else if (event.reason?.message) {
+            message = event.reason.message;
+            stack = event.reason.stack;
+          } else {
+            message = JSON.stringify(event.reason, Object.getOwnPropertyNames(event.reason).slice(0, 10)) || String(event.reason);
+            stack = event.reason?.stack;
+          }
+        } else {
+          message = event?.message || String(event);
+          stack = event?.error?.stack || undefined;
+        }
+
         setOverlayErrors((s) => [{ id, message, stack }, ...s]);
         // keep visible and also log
         // eslint-disable-next-line no-console
@@ -575,6 +591,7 @@ export default function MarketTerminal() {
   }>>({});
 
   const [autopilotInterval, setAutopilotInterval] = useState(30); // in seconds (raised default to reduce API load and false signals)
+  const [autopilotFailurePauseSeconds, setAutopilotFailurePauseSeconds] = useState(120);
   // Global scanning master switch — user confirmed live trading; enable scanning by default
   const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
@@ -615,13 +632,14 @@ export default function MarketTerminal() {
       return [newLog, ...prev].slice(0, 50);
     });
     try {
-      // Surface autopilot events as transient toasts for better UX
+      // Only show toast notifications for significant autopilot events.
+      if (type === "info") return;
       const mapType = type === "trade" || type === "success" ? "SUCCESS" : type === "warn" ? "WARNING" : "INFO";
       showToast(msg, mapType as "SUCCESS" | "WARNING" | "CRITICAL" | "INFO");
     } catch (e) {
       // ignore toast failures
     }
-  }, []);
+  }, [showToast]);
 
   // Load persisted global TP/SL from localStorage on mount
   useEffect(() => {
@@ -711,6 +729,8 @@ export default function MarketTerminal() {
       if (autoSwitchRaw) setAutopilotAutoSwitchEnabled(autoSwitchRaw === "true");
       const savedInterval = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotInterval");
       if (savedInterval) setAutopilotInterval(Math.max(1, parseInt(savedInterval)));
+      const savedFailurePause = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotFailurePauseSeconds");
+      if (savedFailurePause) setAutopilotFailurePauseSeconds(Math.max(30, parseInt(savedFailurePause)));
       setHasLoadedPersistentSettings(true);
     } catch (e) {
       // ignore
@@ -723,9 +743,10 @@ export default function MarketTerminal() {
     try {
       if (typeof window !== "undefined") {
         localStorage.setItem("sentry:autopilotInterval", String(autopilotInterval));
+        localStorage.setItem("sentry:autopilotFailurePauseSeconds", String(autopilotFailurePauseSeconds));
       }
     } catch (e) {}
-  }, [autopilotInterval]);
+  }, [autopilotInterval, autopilotFailurePauseSeconds]);
 
   // Persist TP/SL whenever they change
   useEffect(() => {
@@ -754,6 +775,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:allowLiveShorts", String(allowLiveShorts));
         localStorage.setItem("sentry:positionsView", positionsView);
         localStorage.setItem("sentry:autopilotLossGuard", String(autopilotLossGuard));
+        localStorage.setItem("sentry:autopilotFailurePauseSeconds", String(autopilotFailurePauseSeconds));
         localStorage.setItem("sentry:autopilotBlacklist", JSON.stringify(autopilotBlacklist));
         localStorage.setItem("sentry:tradeFormTab", tradeFormTab);
         localStorage.setItem("sentry:isTickStreamActive", String(isTickStreamActive));
@@ -918,6 +940,8 @@ export default function MarketTerminal() {
   const autopilotBuyCooldownUntilRef = useRef<Record<string, number>>({});
   const networkFailureStrikeRef = useRef<number>(0);
   const networkFailureResumeAtRef = useRef<number>(0);
+  const autopilotFailureStrikeRef = useRef<number>(0);
+  const autopilotFailureResumeAtRef = useRef<number>(0);
   const lastErrorOutcomeAtRef = useRef<number>(0);;
   const autopilotPositionOpenedAtRef = useRef<Record<string, { openedAt: number; entryPrice: number }>>({});
   const autopilotPriceWindowRef = useRef<Record<string, number[]>>({});
@@ -935,6 +959,7 @@ export default function MarketTerminal() {
   const AUTOPILOT_MIN_ATR_PCT = 0.2;
   const AUTOPILOT_MAX_CHOP_SCORE = 0.55;
   const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 10;
+  const AUTOPILOT_FAILURE_PAUSE_MS = autopilotFailurePauseSeconds * 1000;
 
   const armLiquidationCooldown = useCallback((symbol: string, source: string) => {
     const symbolClean = symbol.toUpperCase().trim();
@@ -2653,6 +2678,27 @@ export default function MarketTerminal() {
       setAutopilotScanErrorCount(0);
     }
 
+    if (outcome.status === "BLOCKED" || outcome.status === "REJECTED") {
+      autopilotFailureStrikeRef.current += 1;
+      const strikes = autopilotFailureStrikeRef.current;
+      if (strikes >= 3) {
+        autopilotFailureStrikeRef.current = 0;
+        autopilotFailureResumeAtRef.current = Date.now() + AUTOPILOT_FAILURE_PAUSE_MS;
+        setIsAutopilotActive(false);
+        addAutopilotLog(`Autopilot paused for ${AUTOPILOT_FAILURE_PAUSE_MS / 1000}s after ${strikes} consecutive trade failures.`, "warn");
+        addLog("SYSTEM", "AUTOPILOT_AUTO_PAUSED", `Autopilot paused after ${strikes} consecutive trade failures — will auto-resume in ${AUTOPILOT_FAILURE_PAUSE_MS / 1000}s.`, "WARNING");
+        setTimeout(() => {
+          if (autopilotFailureResumeAtRef.current > 0 && Date.now() >= autopilotFailureResumeAtRef.current - 5000) {
+            autopilotFailureResumeAtRef.current = 0;
+            setIsAutopilotActive(true);
+            addAutopilotLog("Autopilot auto-resumed after error pause.", "info");
+          }
+        }, AUTOPILOT_FAILURE_PAUSE_MS + 1000);
+      }
+    } else if (outcome.status === "FILLED" || outcome.status === "PENDING") {
+      autopilotFailureStrikeRef.current = 0;
+    }
+
     if (isError) lastErrorOutcomeAtRef.current = now;
 
     const qtyText = outcome.executedQty > 0 ? outcome.executedQty : outcome.requestedQty;
@@ -2665,7 +2711,7 @@ export default function MarketTerminal() {
     } else {
       addAutopilotLog(`${source}: ${outcome.status} ${outcome.side} ${outcome.requestedQty} ${outcome.symbol} (${outcome.code}) - ${outcome.message}`, "warn");
     }
-  }, [addAutopilotLog, ERROR_OUTCOME_STICKY_MS, autopilotCurrentScanTarget]);
+  }, [addAutopilotLog, addLog, ERROR_OUTCOME_STICKY_MS, AUTOPILOT_FAILURE_PAUSE_MS, autopilotCurrentScanTarget]);
 
   // Immediate deleverage command callable from UI
   const performDeleverage = useCallback(async () => {
@@ -3722,7 +3768,7 @@ export default function MarketTerminal() {
   } finally {
       setIsAutopilotRunning(false);
     }
-  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, setElliottState, addAutopilotLog, logScanOrderOutcome, quickTickers, autopilotInterval, autopilotScanBroadUniverse, recordMarketStat]);
+  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, setElliottState, addAutopilotLog, logScanOrderOutcome, quickTickers, autopilotInterval, autopilotScanBroadUniverse, recordMarketStat, getAutopilotTradeQty, isCryptoSymbol]);
 
   useEffect(() => {
     if (!isAutopilotActive) {
@@ -3804,7 +3850,7 @@ export default function MarketTerminal() {
         autopilotIntervalHandleRef.current = null;
       }
     };
-  }, [isAutopilotActive, autopilotInterval, executeAutopilotScan, addAutopilotLog]);
+  }, [isAutopilotActive, scanningEnabled, autopilotInterval, executeAutopilotScan, addAutopilotLog]);
 
   // Natural Simulator Market Drift Tick Engine
   useEffect(() => {
@@ -7098,6 +7144,30 @@ if __name__ == "__main__":
                         <option value="30">Every 30 Seconds</option>
                         <option value="60">Every 60 Seconds</option>
                       </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 pt-2" id="failure-pause-duration-row">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                        Autopilot Failure Pause
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          id="autopilot-failure-pause-input"
+                          type="number"
+                          min={30}
+                          step={15}
+                          value={autopilotFailurePauseSeconds}
+                          onChange={(e) => {
+                            const v = parseInt(e.target.value, 10);
+                            setAutopilotFailurePauseSeconds(Number.isFinite(v) ? Math.max(30, v) : 120);
+                          }}
+                          className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
+                        />
+                        <span className="text-gray-400 text-[10px]">seconds</span>
+                      </div>
+                      <p className="text-[9px] text-gray-500 mt-1">Pause duration after 3 consecutive trade failures before auto-resume.</p>
                     </div>
                   </div>
 
