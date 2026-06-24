@@ -99,6 +99,7 @@ type AutopilotOrderOutcomeCode =
   | "BLOCKED_NEGLIGIBLE_QTY"
   | "BLOCKED_BUYING_POWER"
   | "BLOCKED_CRYPTO_ONLY"
+  | "BLOCKED_CRYPTO_DISABLED"
   | "BLOCKED_INSUFFICIENT_USDT"
   | "BLOCKED_LIQUIDITY"
   | "REJECTED_BROKER";
@@ -111,6 +112,14 @@ interface AutopilotOrderResult {
   requestedQty: number;
   executedQty: number;
   message: string;
+}
+
+interface PerformanceCounts {
+  wins: number;
+  losses: number;
+  blocks: number;
+  rejects: number;
+  pending: number;
 }
 
 interface AutopilotMarketStats {
@@ -326,7 +335,7 @@ export default function MarketTerminal() {
   const [useAlpacaLive, setUseAlpacaLive] = useState(true);
   const [allowLiveShorts, setAllowLiveShorts] = useState(true);
   const [positionsView, setPositionsView] = useState<'ALL' | 'LONGS' | 'SHORTS'>('ALL');
-  const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("manual");
+  const [tradeFormTab, setTradeFormTab] = useState<"manual" | "autopilot">("autopilot");
   const [isTickStreamActive, setIsTickStreamActive] = useState(true);
   const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
   const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
@@ -345,9 +354,9 @@ export default function MarketTerminal() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [orderError, setOrderError] = useState("");
   const [orderSuccess, setOrderSuccess] = useState("");
-  const [binancePreferredUsdt, setBinancePreferredUsdt] = useState<number>(0);
-  const [binanceFundingSource, setBinanceFundingSource] = useState<"futures" | "spot" | "none">("none");
-  const [binanceFundingUpdatedAt, setBinanceFundingUpdatedAt] = useState<number | null>(null);
+  const [, setBinancePreferredUsdt] = useState<number>(0);
+  const [, setBinanceFundingSource] = useState<"futures" | "spot" | "none">("none");
+  const [, setBinanceFundingUpdatedAt] = useState<number | null>(null);
 
   // Simulated (Paper Setup) Parameters
   const [simCash, setSimCash] = useState(2000);
@@ -416,6 +425,36 @@ export default function MarketTerminal() {
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [aiAnalysisGeneratedAt, setAiAnalysisGeneratedAt] = useState<number | null>(null);
   const [aiAnalysisSnapshot, setAiAnalysisSnapshot] = useState<{ equity: number; cash: number; positions: number } | null>(null);
+  const [aiAnalysisLive, setAiAnalysisLive] = useState<boolean | null>(null);
+
+  const aiAnalysisSummary = useMemo(() => {
+    if (!aiAnalysis) return "";
+    const lines = aiAnalysis
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (lines.length === 0) return "";
+    const header = lines.find((line) => line.startsWith("##") || line.startsWith("###") || line.startsWith("* ") || line.match(/^\d+\./));
+    if (header) {
+      return header.replace(/^#+\s*/, "").replace(/^\*\s*/, "").slice(0, 120);
+    }
+
+    return lines.slice(0, 2).join(" ").slice(0, 120);
+  }, [aiAnalysis]);
+
+  const diagnosticLogs = useMemo(() => {
+    return logs.filter((log) => log.symbol === "GEMINI" || log.action.startsWith("DIAGNOSE")).slice(0, 5);
+  }, [logs]);
+
+  const latestDiagnosticLog = diagnosticLogs[0] ?? null;
+  const latestDiagnosticStatus = useMemo(() => {
+    if (!latestDiagnosticLog) return "No diagnostics run yet";
+    if (latestDiagnosticLog.action === "DIAGNOSE_REQUEST") return "Running";
+    if (latestDiagnosticLog.action === "DIAGNOSE_SUCCESS") return "Success";
+    if (latestDiagnosticLog.action === "DIAGNOSE_ERROR") return "Error";
+    return latestDiagnosticLog.status;
+  }, [latestDiagnosticLog]);
 
   // Portfolio Liquidation Action States
   const [isLiquidating, setIsLiquidating] = useState<string | null>(null);
@@ -494,29 +533,11 @@ export default function MarketTerminal() {
       setBinanceFundingUpdatedAt(Date.now());
       return { usdt: 0, source: "none" };
     }
-  }, []);
-
-  useEffect(() => {
-    let mounted = true;
-    const refresh = async () => {
-      const snap = await fetchBinanceFundingSnapshot();
-      if (!mounted) return;
-      if (snap.usdt <= 0 && snap.source === "none") {
-        // Keep this informational only; order flow still performs hard checks.
-      }
-    };
-
-    refresh();
-    const t = setInterval(refresh, 45000);
-    return () => {
-      mounted = false;
-      clearInterval(t);
-    };
-  }, [fetchBinanceFundingSnapshot]);
+  }, [setBinanceFundingSource, setBinanceFundingUpdatedAt, setBinancePreferredUsdt]);
 
   // --- SENTRY AUTOPILOT STATE VARIABLES & ENGINES ---
   const [isAutopilotActive, setIsAutopilotActive] = useState(true);
-  const [autopilotAutoStart, setAutopilotAutoStart] = useState<boolean>(false);
+  const [autopilotAutoStart, setAutopilotAutoStart] = useState<boolean>(true);
   const [autopilotStrategy, setAutopilotStrategy] = useState<"SENTRY_HEAL" | "GEMINI_AI" | "SCALPER" | "TOUCH_TURN" | "MACD_FRONT_SIDE" | "SNEAKY_PIVOT" | "ELLIOTT_WAVE">("SCALPER");
 
   // Elliott Wave state map for tracking wave counts per symbol
@@ -597,7 +618,7 @@ export default function MarketTerminal() {
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
   const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
   const [autopilotCryptoOnly, setAutopilotCryptoOnly] = useState<boolean>(false);
-  const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean; india: boolean; crypto: boolean }>({ wallStreet: false, india: false, crypto: false });
+  const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean; india: boolean; crypto: boolean }>({ wallStreet: false, india: false, crypto: true });
   const [autopilotAutoSwitchEnabled, setAutopilotAutoSwitchEnabled] = useState<boolean>(true);
   const [activeVisualizerSymbol] = useState<string>("");
 
@@ -607,7 +628,7 @@ export default function MarketTerminal() {
 
   // Risk screening & diversification controls
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
-  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(50); // percent of portfolio per symbol
+  const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(65); // percent of portfolio per symbol
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(5); // concurrent open positions
   const [maxConcurrentCryptoPositions, setMaxConcurrentCryptoPositions] = useState<number>(3); // concurrent open crypto positions
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
@@ -673,11 +694,9 @@ export default function MarketTerminal() {
       if (targetStored) {
         setAutopilotTargetTicker(targetStored.toUpperCase().trim());
       }
-      if (autoStartStored) {
-        const enabled = autoStartStored === "true";
-        setAutopilotAutoStart(enabled);
-        if (enabled) setIsAutopilotActive(true);
-      }
+      const autoStartEnabled = autoStartStored === null ? true : autoStartStored === "true";
+      setAutopilotAutoStart(autoStartEnabled);
+      if (autoStartEnabled) setIsAutopilotActive(true);
       if (warnStored) {
         const n = parseFloat(warnStored);
         if (Number.isFinite(n)) setWarnThreshold(Math.max(1, Math.min(99, n)));
@@ -723,7 +742,14 @@ export default function MarketTerminal() {
       }
       if (broadScan) setAutopilotScanBroadUniverse(broadScan === "true");
       if (blockedMarketsStored) {
-        try { setBlockedMarkets(JSON.parse(blockedMarketsStored)); } catch (e) {}
+        try {
+          const parsed = JSON.parse(blockedMarketsStored);
+          setBlockedMarkets({
+            wallStreet: !!parsed.wallStreet,
+            india: !!parsed.india,
+            crypto: true,
+          });
+        } catch (e) {}
       }
       const autoSwitchRaw = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotAutoSwitchEnabled");
       if (autoSwitchRaw) setAutopilotAutoSwitchEnabled(autoSwitchRaw === "true");
@@ -781,7 +807,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:isTickStreamActive", String(isTickStreamActive));
       }
     } catch (e) {}
-  }, [hasLoadedPersistentSettings, autopilotStrategy, autopilotTargetTicker, autopilotAutoStart, warnThreshold, criticalThreshold, globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, autopilotCryptoOnly, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin, autopilotLossGuard, autopilotBlacklist, tradeFormTab, isTickStreamActive]);
+  }, [hasLoadedPersistentSettings, autopilotStrategy, autopilotTargetTicker, autopilotAutoStart, warnThreshold, criticalThreshold, globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, autopilotCryptoOnly, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin, autopilotLossGuard, autopilotFailurePauseSeconds, autopilotBlacklist, tradeFormTab, isTickStreamActive]);
 
   // Crypto-only auto-switch removed: non-crypto buys are allowed at all times unless explicitly blocked.
 
@@ -830,8 +856,6 @@ export default function MarketTerminal() {
       "GOOG",
       "AMZN",
       "META",
-      "BTCUSD",
-      "ETHUSD",
       "SPY",
       "QQQ",
       "AMD",
@@ -913,25 +937,12 @@ export default function MarketTerminal() {
   const [autopilotCurrentScanTarget, setAutopilotCurrentScanTarget] = useState<string | null>(null);
   const [autopilotScanError, setAutopilotScanError] = useState<string | null>(null);
   const [autopilotScanErrorCount, setAutopilotScanErrorCount] = useState<number>(0);
+  const [autopilotScanTotalTargets, setAutopilotScanTotalTargets] = useState<number>(0);
+  const [autopilotScanProcessedCount, setAutopilotScanProcessedCount] = useState<number>(0);
+  const [autopilotPerformance, setAutopilotPerformance] = useState<Record<string, PerformanceCounts>>({});
+  const [symbolPerformance, setSymbolPerformance] = useState<Record<string, PerformanceCounts>>({});
   const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
   // Derived counts
-  const coinCount = useMemo(() => {
-    const positions = useAlpacaLive ? (alpacaPositions || []) : (mockPositions || []);
-    const seen = new Set<string>();
-    for (const p of positions) {
-      try {
-        const s = String(p?.symbol || "").toUpperCase().trim();
-        if (!s) continue;
-        // treat crypto by suffix or known pairs
-        if (s.endsWith("USD") || s.endsWith("USDT") || s.includes("BTC") || s.includes("ETH")) {
-          seen.add(s);
-        }
-      } catch (e) {
-        continue;
-      }
-    }
-    return seen.size;
-  }, [useAlpacaLive, alpacaPositions, mockPositions]);
   const prevAutopilotActiveRef = useRef<boolean | null>(null);
   const sentryHealthStateRef = useRef<"healthy" | "warning" | null>(null);
   const autopilotPendingBuySymbolsRef = useRef<Set<string>>(new Set());
@@ -1006,22 +1017,20 @@ export default function MarketTerminal() {
       .filter(Boolean);
     const blacklistSet = new Set((autopilotBlacklist || []).map((s) => s.toUpperCase()));
     const broadUniverseTargets = autopilotScanBroadUniverse ? quickTickers.map((s) => s.toUpperCase()) : [];
+    const isAllowedScanSymbol = (sym: string) => !isCryptoSymbol(sym);
     const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
     const nowTs = Date.now();
     const isLossGuardTemporarilyBlocked = (sym: string) => (autopilotLossGuardBlockedUntilRef.current[sym] || 0) > nowTs;
 
-    let scanTargets = baseTargets.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
+    let scanTargets = baseTargets.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym) && isAllowedScanSymbol(sym));
     const marketSessionNow = getMarketSessionET();
     if (marketSessionNow === "CLOSED") {
-      scanTargets = scanTargets.filter((sym) => isCryptoSymbol(sym));
+      scanTargets = [];
     }
 
     if (scanTargets.length === 0) {
       const dynamicPool = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...quickTickers.map((s) => s.toUpperCase())]));
-      scanTargets = dynamicPool.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
-      if (marketSessionNow === "CLOSED") {
-        scanTargets = scanTargets.filter((sym) => isCryptoSymbol(sym));
-      }
+      scanTargets = dynamicPool.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym) && isAllowedScanSymbol(sym));
     }
 
     return scanTargets;
@@ -1064,16 +1073,41 @@ export default function MarketTerminal() {
     return isCryptoSymbol(symbol) ? 18 : 8;
   }, [isCryptoSymbol]);
 
-  // Calculate autopilot trade quantity based on broker type and symbol
+  // Calculate autopilot trade quantity based on broker type, symbol, and trend strength
   const getAutopilotTradeQty = useCallback((symbol: string, isAlpaca: boolean) => {
     const isCrypto = isCryptoSymbol(symbol);
-    if (isAlpaca) {
-      // Alpaca: stocks larger, crypto smaller
-      return symbol === "BTCUSD" ? 0.05 : isCrypto ? 0.02 : 10;
-    } else {
-      // Binance: crypto generally larger quantities in stablecoins
-      return symbol === "BTCUSD" ? 0.1 : isCrypto ? 0.5 : 10;
+    const baseQty = isAlpaca
+      ? symbol === "BTCUSD"
+        ? 0.05
+        : isCrypto
+        ? 0.05
+        : 20
+      : symbol === "BTCUSD"
+      ? 0.1
+      : isCrypto
+      ? 0.5
+      : 15;
+
+    const stats = autopilotMarketStatsRef.current[symbol];
+    if (!stats) {
+      return baseQty;
     }
+
+    const trendBoost = Math.max(0, stats.trendStrength - 0.45) * 0.8;
+    const edgeBoost = Math.max(0, stats.expectedEdgeBps / 100) * 0.2;
+    const chopPenalty = stats.chopScore > 0.6 ? 0.85 : 1;
+    const atrPenalty = stats.atrPct > 3 ? 0.92 : 1;
+
+    const multiplier = Math.min(2.5, 1 + trendBoost + edgeBoost) * chopPenalty * atrPenalty;
+    const adjustedQty = Math.max(baseQty, baseQty * multiplier);
+
+    if (isCrypto) {
+      return symbol === "BTCUSD"
+        ? parseFloat(adjustedQty.toFixed(4))
+        : parseFloat(adjustedQty.toFixed(3));
+    }
+
+    return parseFloat(adjustedQty.toFixed(2));
   }, [isCryptoSymbol]);
 
   const ensureDailyGuardWindow = useCallback(() => {
@@ -1126,79 +1160,7 @@ export default function MarketTerminal() {
   }, [getEstimatedCostBps]);
 
   const mergeBinanceSpotIntoPositions = useCallback(async (basePositions: Position[]): Promise<Position[]> => {
-    try {
-      const binanceRes = await fetch("/api/binance/account", { cache: "no-store" });
-      const binanceText = await binanceRes.text();
-      let binanceData: any = null;
-      try {
-        binanceData = JSON.parse(binanceText);
-      } catch (e) {
-        return basePositions;
-      }
-
-      if (!binanceRes.ok || binanceData?.error || !Array.isArray(binanceData?.account?.balances)) {
-        return basePositions;
-      }
-
-      const stableAssets = new Set(["USDT", "USD", "USDC", "BUSD", "FDUSD", "TUSD", "USDP"]);
-      const nonZeroBalances = binanceData.account.balances.filter((b: any) => {
-        const asset = String(b?.asset || "").toUpperCase();
-        const qty = (parseFloat(String(b?.free || 0)) || 0) + (parseFloat(String(b?.locked || 0)) || 0);
-        return asset && !stableAssets.has(asset) && qty > 0;
-      });
-
-      if (nonZeroBalances.length === 0) {
-        return basePositions;
-      }
-
-      const derived = await Promise.all(nonZeroBalances.map(async (b: any) => {
-        const asset = String(b?.asset || "").toUpperCase();
-        const qty = (parseFloat(String(b?.free || 0)) || 0) + (parseFloat(String(b?.locked || 0)) || 0);
-        if (!asset || qty <= 0) return null;
-
-        let px = 0;
-        try {
-          const pRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${asset}USDT`, { cache: "no-store" });
-          const pText = await pRes.text();
-          const pJson = JSON.parse(pText || "{}");
-          px = parseFloat(String(pJson?.price || 0)) || 0;
-        } catch (e) {
-          px = 0;
-        }
-
-        if (!(px > 0)) return null;
-
-        const marketValue = qty * px;
-        return {
-          symbol: `${asset}USD`,
-          qty,
-          avg_entry_price: px,
-          current_price: px,
-          market_value: marketValue,
-          unrealized_pl: 0,
-          unrealized_plpc: 0,
-          maintenance_margin_rate: 0.5,
-        } as Position;
-      }));
-
-      const derivedPositions = derived.filter(Boolean) as Position[];
-      if (derivedPositions.length === 0) {
-        return basePositions;
-      }
-
-      const mergedBySymbol = new Map<string, Position>();
-      for (const p of basePositions || []) mergedBySymbol.set(String(p.symbol || "").toUpperCase(), p);
-      for (const p of derivedPositions) {
-        const key = String(p.symbol || "").toUpperCase();
-        if (!mergedBySymbol.has(key)) {
-          mergedBySymbol.set(key, p);
-        }
-      }
-
-      return Array.from(mergedBySymbol.values());
-    } catch (e) {
-      return basePositions;
-    }
+    return basePositions;
   }, []);
 
   // Refresh data proxy
@@ -1473,7 +1435,18 @@ export default function MarketTerminal() {
     }
     symbolClean = symbolClean.toUpperCase().trim();
 
-    
+    if (isCryptoSymbol(symbolClean)) {
+      addAutopilotLog(`Blocked ${side} ${symbolClean}: crypto trading is disabled in this terminal app.`, "warn");
+      return {
+        status: "BLOCKED",
+        code: "BLOCKED_CRYPTO_DISABLED",
+        symbol: symbolClean,
+        side,
+        requestedQty: qtyNum,
+        executedQty: 0,
+        message: "Crypto trading is disabled in this terminal app."
+      };
+    }
 
     if (side === "BUY") {
       const cooldownUntil = autopilotBuyCooldownUntilRef.current[symbolClean] || 0;
@@ -1894,7 +1867,22 @@ export default function MarketTerminal() {
           const isFractional = qtyNum % 1 !== 0;
           // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
           const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
-          const maxSafeOrderVal = maxAllowedPower * 0.80; // enforce a 20% safety collar/buffer for fractional buy orders
+          const effectiveAllowedPower = Math.max(0, maxAllowedPower);
+          const maxSafeOrderVal = effectiveAllowedPower * 0.90; // enforce a 10% safety collar/buffer for fractional buy orders
+
+          if (effectiveAllowedPower <= 0) {
+            addAutopilotLog(`Blocked live automated BUY: account buying power is unavailable or negative (${maxAllowedPower.toFixed(2)}).`, "warn");
+            addLog(symbolClean, "AUTO_BUY_BLOCKED", `Account buying power unavailable or negative (${maxAllowedPower.toFixed(2)}).`, "WARNING");
+            return {
+              status: "BLOCKED",
+              code: "BLOCKED_BUYING_POWER",
+              symbol: symbolClean,
+              side,
+              requestedQty: qtyNum,
+              executedQty: 0,
+              message: `Buying power is unavailable or negative (${maxAllowedPower.toFixed(2)}).`
+            };
+          }
 
           if (estimatedCost > maxSafeOrderVal) {
             const maxAffordableQty = maxSafeOrderVal / estPrice;
@@ -2283,23 +2271,7 @@ export default function MarketTerminal() {
         if (isNetworkFetchFailure && curRef.useAlpacaLive) {
           networkFailureStrikeRef.current += 1;
           const strikes = networkFailureStrikeRef.current;
-          if (strikes >= 3) {
-            // After 3 consecutive network failures, pause for 90s then auto-resume
-            networkFailureStrikeRef.current = 0;
-            networkFailureResumeAtRef.current = Date.now() + 90_000;
-            setIsAutopilotActive(false);
-            addAutopilotLog(`Network unreachable (3 consecutive failures). Autopilot pausing for 90s then auto-resuming.`, "warn");
-            addLog("SYSTEM", "AUTOPILOT_AUTO_PAUSED", "Autopilot paused after 3 network failures — will auto-resume in 90s.", "WARNING");
-            setTimeout(() => {
-              if (networkFailureResumeAtRef.current > 0 && Date.now() >= networkFailureResumeAtRef.current - 5000) {
-                networkFailureResumeAtRef.current = 0;
-                setIsAutopilotActive(true);
-                addAutopilotLog("Network recovered — Autopilot auto-resumed.", "info");
-              }
-            }, 91_000);
-          } else {
-            addAutopilotLog(`Network hiccup (strike ${strikes}/3) for ${symbolClean} — skipping this tick, will retry.`, "warn");
-          }
+          addAutopilotLog(`Network hiccup (strike ${strikes}/3) for ${symbolClean} — skipping this tick, will retry.`, "warn");
         } else {
           // Successful non-network request resets the strike counter
           networkFailureStrikeRef.current = 0;
@@ -2648,7 +2620,7 @@ export default function MarketTerminal() {
         }
       }
     }
-  }, [addAutopilotLog, addLog, armLiquidationCooldown, isLossMakingPosition, computeOpenCounts, isCryptoSymbol, normalizeSymbol, ensureDailyGuardWindow]);
+  }, [addAutopilotLog, addLog, armLiquidationCooldown, isLossMakingPosition, computeOpenCounts, isCryptoSymbol, normalizeSymbol, ensureDailyGuardWindow, AUTOPILOT_MIN_HOLD_MS, fetchBinanceFundingSnapshot]);
 
   const ERROR_OUTCOME_STICKY_MS = 45_000; // errors stay in the UI card for 45s
 
@@ -2677,6 +2649,55 @@ export default function MarketTerminal() {
       setAutopilotScanError(null);
       setAutopilotScanErrorCount(0);
     }
+
+    const adjustCounts = (key: string, outcome: AutopilotOrderResult) => {
+      const base = { wins: 0, losses: 0, blocks: 0, rejects: 0, pending: 0 };
+      const mapOutcome = { ...base };
+
+      if (outcome.status === "FILLED") {
+        mapOutcome.wins = 1;
+      } else if (outcome.status === "PENDING") {
+        mapOutcome.pending = 1;
+      } else if (outcome.status === "BLOCKED") {
+        mapOutcome.losses = 1;
+        mapOutcome.blocks = 1;
+      } else if (outcome.status === "REJECTED") {
+        mapOutcome.losses = 1;
+        mapOutcome.rejects = 1;
+      } else if (outcome.status === "INVALID") {
+        mapOutcome.losses = 1;
+      }
+
+      setAutopilotPerformance((prev) => {
+        const existing = prev[key] || base;
+        return {
+          ...prev,
+          [key]: {
+            wins: existing.wins + mapOutcome.wins,
+            losses: existing.losses + mapOutcome.losses,
+            blocks: existing.blocks + mapOutcome.blocks,
+            rejects: existing.rejects + mapOutcome.rejects,
+            pending: existing.pending + mapOutcome.pending,
+          },
+        };
+      });
+
+      setSymbolPerformance((prev) => {
+        const existing = prev[outcome.symbol] || base;
+        return {
+          ...prev,
+          [outcome.symbol]: {
+            wins: existing.wins + mapOutcome.wins,
+            losses: existing.losses + mapOutcome.losses,
+            blocks: existing.blocks + mapOutcome.blocks,
+            rejects: existing.rejects + mapOutcome.rejects,
+            pending: existing.pending + mapOutcome.pending,
+          },
+        };
+      });
+    };
+
+    adjustCounts(source, outcome);
 
     if (outcome.status === "BLOCKED" || outcome.status === "REJECTED") {
       autopilotFailureStrikeRef.current += 1;
@@ -2810,12 +2831,17 @@ export default function MarketTerminal() {
       }
 
       if (scanTargets.length === 0) {
+        setAutopilotScanTotalTargets(0);
+        setAutopilotScanProcessedCount(0);
         setAutopilotCurrentScanTarget(null);
         setAutopilotScanError("No eligible scan targets are available right now.");
         setAutopilotScanErrorCount(0);
-        addAutopilotLog("Autopilot scan skipped: market session is CLOSED and no crypto symbols are eligible.", "info");
+        addAutopilotLog("Autopilot scan skipped: market session is CLOSED.", "info");
         return;
       }
+
+      setAutopilotScanTotalTargets(scanTargets.length);
+      setAutopilotScanProcessedCount(0);
 
       const targetIdx = autopilotTargetSymbolIndexRef.current % scanTargets.length;
       const orderedScanTargets = [...scanTargets.slice(targetIdx), ...scanTargets.slice(0, targetIdx)];
@@ -2832,6 +2858,7 @@ export default function MarketTerminal() {
 
       for (const targetSymbol of processedScanTargets) {
         setAutopilotCurrentScanTarget(targetSymbol);
+        setAutopilotScanProcessedCount((prev) => prev + 1);
         const matchedForStats = currentActivePositions.find((p) => p.symbol === targetSymbol);
         const scanPrice = matchedForStats?.current_price || (targetSymbol === "BTCUSD" ? 67200.0 : targetSymbol === "ETHUSD" ? 3800.0 : 150.0);
         recordMarketStat(targetSymbol, scanPrice);
@@ -4479,7 +4506,12 @@ export default function MarketTerminal() {
     setOrderSuccess("");
     setIsPlacingOrder(true);
 
-    
+    if (isCryptoSymbol(symbolClean)) {
+      setIsPlacingOrder(false);
+      setOrderError("Crypto trading is disabled in this terminal app.");
+      addLog(symbolClean, `${side}_BLOCKED`, "Crypto trading is disabled in this terminal app.", "WARNING");
+      return;
+    }
 
     let estPrice = 150.0;
     const matchedTicker = useAlpacaLive 
@@ -5696,6 +5728,7 @@ if __name__ == "__main__":
         cash: activeCash,
         positions: activePositions.length,
       });
+      setAiAnalysisLive(resultData?.sandbox === false ? true : resultData?.sandbox === true ? false : null);
       addLog("GEMINI", "DIAGNOSE_SUCCESS", "AI Stress diagnosis compiled successfully.", "SUCCESS");
     } catch (err: any) {
       console.error(err);
@@ -5716,17 +5749,6 @@ if __name__ == "__main__":
       }
     : null;
 
-  const binanceFundingSourceLabel = binanceFundingSource === "futures"
-    ? "FUTURES"
-    : binanceFundingSource === "spot"
-      ? "SPOT"
-      : "NONE";
-  const binanceFundingSourcePillClass = binanceFundingSource === "futures"
-    ? "bg-emerald-950/30 text-emerald-300 border border-emerald-600/40"
-    : binanceFundingSource === "spot"
-      ? "bg-cyan-950/30 text-cyan-300 border border-cyan-600/40"
-      : "bg-yellow-950/30 text-yellow-300 border border-yellow-600/40";
-  const binanceFundingAgeSec = binanceFundingUpdatedAt ? Math.max(0, Math.floor((Date.now() - binanceFundingUpdatedAt) / 1000)) : null;
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 bg-brand-bg md:p-8" id="root-container">
@@ -5757,20 +5779,9 @@ if __name__ == "__main__":
 
       {/* Auto-switch control */}
       <div className="mt-4 mb-4 flex items-center gap-3">
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={!!autopilotAutoSwitchEnabled}
-            onChange={(e) => {
-              const v = e.target.checked;
-              setAutopilotAutoSwitchEnabled(v);
-              try { if (typeof window !== 'undefined') localStorage.setItem('sentry:autopilotAutoSwitchEnabled', String(v)); } catch (e) {}
-              addAutopilotLog(`Autopilot auto-switch ${v ? 'enabled' : 'disabled'} by user.`, 'info');
-            }}
-            className="form-checkbox h-4 w-4"
-          />
-          <span className="text-xs">Auto-switch to crypto-only outside Wall Street hours</span>
-        </label>
+        <div className="rounded-lg border border-brand-border/60 bg-brand-bg/50 px-4 py-3 text-xs text-gray-300 font-mono">
+          Crypto trading is disabled in this terminal app. Autopilot will not switch into a crypto-only strategy.
+        </div>
       </div>
       {/* Broker selector: Alpaca or AngelOne (paper mode supported) */}
       <div className="mb-4 flex items-center gap-3">
@@ -6018,17 +6029,6 @@ if __name__ == "__main__":
                 </div>
               </div>
 
-              <div className="py-2 px-2.5 rounded-lg bg-brand-bg/40 border border-brand-border/60">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs text-gray-400 font-medium">Binance Funding Source</span>
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider font-mono ${binanceFundingSourcePillClass}`}>
-                    {binanceFundingSourceLabel}
-                  </span>
-                </div>
-                <p className="text-[10px] text-gray-500 mt-1 font-mono">
-                  Preferred USDT: {binancePreferredUsdt.toFixed(4)}{binanceFundingAgeSec !== null ? ` • updated ${binanceFundingAgeSec}s ago` : ""}
-                </p>
-              </div>
             </div>
           </div>
 
@@ -6140,18 +6140,6 @@ if __name__ == "__main__":
                 </div>
               </>
             )}
-          </div>
-
-          {/* DEDICATED CARD: Crypto Holdings Count */}
-          <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden" id="stat-crypto-count">
-            <svg className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2v20M2 12h20" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono text-yellow-300">
-              Crypto Holdings
-            </span>
-            <div className={`text-2xl sm:text-3xl font-extrabold font-mono break-all text-white`} id="crypto-holdings-count">
-              {coinCount}
-            </div>
-            <div className="text-xs mt-1.5 font-mono text-gray-400">Distinct coins/pairs held</div>
           </div>
 
           {/* DEDICATED CARD: Open Positions P&L (Active Trades) */}
@@ -6483,6 +6471,43 @@ if __name__ == "__main__":
               </button>
             </div>
 
+            <div className="mt-4 flex flex-col gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+                <div className="inline-flex items-center gap-2 rounded-full border border-brand-border/80 bg-slate-950/70 px-3 py-1">
+                  <span className={`h-2.5 w-2.5 rounded-full ${aiAnalysisLive === true ? "bg-brand-green animate-pulse" : aiAnalysisLive === false ? "bg-amber-500" : "bg-gray-500"}`} />
+                  <span>{aiAnalysisLive === true ? "Live Gemini Diagnostics" : aiAnalysisLive === false ? "Fallback Diagnostics" : "Gemini Diagnostic Status"}</span>
+                </div>
+                {aiAnalysisSummary && (
+                  <div className="rounded-full border border-brand-border/80 bg-slate-950/70 px-3 py-1 text-gray-300">
+                    {aiAnalysisSummary}
+                  </div>
+                )}
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 text-[10px] text-gray-300">
+                <div className="rounded-xl border border-brand-border/70 bg-zinc-950/60 p-3">
+                  <div className="font-semibold text-white">Diagnostic log</div>
+                  <div className="mt-1 text-gray-400">Latest status: {latestDiagnosticStatus}</div>
+                  {latestDiagnosticLog && (
+                    <div className="mt-2 text-[10px] text-gray-300 leading-relaxed">
+                      <div className="font-semibold">{latestDiagnosticLog.action}</div>
+                      <div className="mt-1 text-gray-400">{latestDiagnosticLog.message}</div>
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-xl border border-brand-border/70 bg-zinc-950/60 p-3">
+                  <div className="font-semibold text-white">Recent diagnostic events</div>
+                  <div className="mt-2 space-y-1 text-[10px] text-gray-300">
+                    {diagnosticLogs.length > 0 ? diagnosticLogs.map((log) => (
+                      <div key={log.id} className="rounded-md border border-brand-border/40 bg-brand-bg/80 p-2">
+                        <div className="text-gray-400">[{log.timestamp}]</div>
+                        <div className="text-white">{log.action}</div>
+                      </div>
+                    )) : <div className="text-gray-500">No diagnostic logs yet.</div>}
+                  </div>
+                </div>
+              </div>
+            </div>
+
             {/* AI Diagnostics Text Area Display */}
             <div className="bg-brand-bg rounded-xl border border-brand-border p-4 h-[255px] overflow-y-auto" id="ai-result-display">
               {aiAnalysis ? (
@@ -6565,7 +6590,7 @@ if __name__ == "__main__":
               ? "Regular session active (9:30 AM – 4:00 PM ET). All order types supported."
               : marketSession === "EXTENDED"
               ? "Extended hours (4:00–8:00 AM / 4:00–8:00 PM ET). Equity orders use limit + extended_hours=true. Expect wider spreads and lower fills."
-              : "Market closed. Only crypto (BTCUSD/ETHUSD) trades 24/7. Equity orders will be rejected until pre-market opens at 4:00 AM ET."}
+              : "Market closed. Equity orders are rejected until pre-market opens at 4:00 AM ET. Crypto trading is disabled in this terminal app."}
           </span>
         </div>
       )}
@@ -7245,15 +7270,15 @@ if __name__ == "__main__":
 
                   <div className="rounded-xl border border-brand-border/40 bg-zinc-950/40 p-3 mt-3 text-white" id="autopilot-scan-list-card">
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-[10px] uppercase tracking-[0.3em] text-gray-400 font-semibold font-mono">Active Scan Universe</span>
-                      <span className="text-[11px] text-sky-300 font-semibold font-mono">{autopilotScanList.length} symbols</span>
+                      <span className="text-[10px] uppercase tracking-[0.3em] text-gray-400 font-semibold font-mono">Autopilot Scan Status</span>
+                      <span className="text-[11px] text-sky-300 font-semibold font-mono">{autopilotScanTotalTargets} targets</span>
                     </div>
                     {autopilotCurrentScanTarget ? (
                       <div className="mb-2 rounded-xl border border-sky-500/20 bg-sky-950/10 px-3 py-2 text-[11px] text-sky-200">
                         <div className="flex items-center justify-between gap-3">
                           <div>
                             <div className="font-semibold text-white">Scanning now</div>
-                            <div className="mt-1 text-gray-300">Current high-priority target: <span className="font-bold text-white">{autopilotCurrentScanTarget}</span></div>
+                            <div className="mt-1 text-gray-300">Current target: <span className="font-bold text-white">{autopilotCurrentScanTarget}</span></div>
                           </div>
                           {autopilotScanErrorCount > 0 && (
                             <div className="rounded-full bg-yellow-500/20 text-yellow-100 text-[10px] uppercase tracking-[0.2em] px-2 py-1 font-semibold">
@@ -7274,20 +7299,15 @@ if __name__ == "__main__":
                         <div>{autopilotScanError}</div>
                       </div>
                     )}
-                    {autopilotScanList.length > 0 ? (
-                      <div className="flex flex-wrap gap-2">
-                        {autopilotScanList.map((symbol) => (
-                          <span
-                            key={symbol}
-                            className={`px-2 py-1 rounded-full border text-[11px] font-semibold font-mono ${symbol === autopilotCurrentScanTarget ? "bg-sky-500/20 border-sky-400 text-sky-100" : "bg-brand-bg/70 border-brand-border text-gray-200"}`}
-                          >
-                            {symbol}
-                          </span>
-                        ))}
+                    <div className="rounded-xl border border-brand-border/50 bg-brand-bg/60 p-3 text-[11px] text-gray-300">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold">Progress</span>
+                        <span className="text-sky-300">{autopilotScanProcessedCount} / {autopilotScanTotalTargets}</span>
                       </div>
-                    ) : (
-                      <p className="text-[10px] text-gray-500">No symbols are currently being scanned. Activate autopilot or adjust your target/universe settings.</p>
-                    )}
+                      <div className="mt-2 text-[10px] text-gray-400">
+                        {autopilotScanTotalTargets > 0 ? `Processing eligible targets across your configured universe.` : "No scan targets available."}
+                      </div>
+                    </div>
                   </div>
 
                   {/* Risk & diversification controls */}
@@ -7351,32 +7371,11 @@ if __name__ == "__main__":
                       />
                       <p className="text-[9px] text-gray-500 mt-1">Limit concurrent open positions to reduce concentration.</p>
                     </div>
-                    <div>
-                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Max Concurrent Crypto</label>
-                      <input
-                        id="max-concurrent-crypto-input"
-                        type="number"
-                        min={1}
-                        step={1}
-                        value={maxConcurrentCryptoPositions}
-                        onChange={(e) => setMaxConcurrentCryptoPositions(Number.isFinite(parseFloat(e.target.value)) ? Math.max(1, parseInt(e.target.value)) : 1)}
-                        className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
-                      />
-                      <p className="text-[9px] text-gray-500 mt-1">Limit concurrent open crypto positions separately.</p>
-                    </div>
                     <div className="col-span-4 pt-3">
                       <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Market Blocks</label>
                       <div className="flex flex-col gap-2">
                         <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.wallStreet} onChange={(e) => setBlockedMarkets((s) => ({...s, wallStreet: e.target.checked}))} />Block Wall Street (NYSE/NASDAQ)</label>
                         <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.india} onChange={(e) => setBlockedMarkets((s) => ({...s, india: e.target.checked}))} />Block India (NSE/BSE)</label>
-                        <label className="text-[10px] text-gray-400 font-mono"><input type="checkbox" className="mr-2" checked={blockedMarkets.crypto} onChange={(e) => {
-                          const checked = e.target.checked;
-                          setBlockedMarkets((s) => ({...s, crypto: checked}));
-                          if (checked) {
-                            // Clear any crypto-only autopilot mode when user explicitly blocks crypto
-                            try { setAutopilotCryptoOnly(false); addAutopilotLog('Crypto market blocked — disabling crypto-only autopilot flag.', 'info'); } catch (er) {}
-                          }
-                        }} />Block Crypto</label>
                       </div>
                       <p className="text-[9px] text-gray-500 mt-1">Use these to prevent autopilot from opening new BUYs on the selected markets.</p>
                     </div>
@@ -7404,7 +7403,7 @@ if __name__ == "__main__":
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3 pt-3" id="live-min-qty-row">
+                  <div className="grid grid-cols-1 gap-3 pt-3" id="live-min-qty-row">
                     <div>
                       <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Live Min Qty (Stocks)</label>
                       <input
@@ -7417,19 +7416,6 @@ if __name__ == "__main__":
                         className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
                       />
                       <p className="text-[9px] text-gray-500 mt-1">Minimum live equity size after auto-resizing.</p>
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Live Min Qty (Crypto)</label>
-                      <input
-                        id="live-min-crypto-qty-input"
-                        type="number"
-                        min={0.000001}
-                        step={0.0001}
-                        value={liveMinCryptoOrderQty}
-                        onChange={(e) => setLiveMinCryptoOrderQty(Number.isFinite(parseFloat(e.target.value)) ? Math.max(0.000001, parseFloat(e.target.value)) : 0.0001)}
-                        className="w-full bg-brand-bg border border-brand-border text-white text-xs rounded p-2 focus:outline-none focus:border-brand-green font-mono"
-                      />
-                      <p className="text-[9px] text-gray-500 mt-1">Minimum live crypto size after auto-resizing.</p>
                     </div>
                   </div>
 
@@ -7979,6 +7965,66 @@ if __name__ == "__main__":
                   <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 font-mono">
                     🤖 Autopilot Activity feed
                   </span>
+                  <div className="grid grid-cols-1 gap-3 mb-3">
+                    <div className="rounded-xl border border-brand-border/40 bg-slate-950/70 p-3 text-[10px] text-gray-300">
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="font-semibold uppercase tracking-[0.2em]">Performance Summary</span>
+                        <span className="text-sky-300">{Object.keys(autopilotPerformance).length} strategies</span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <div>
+                          <div className="text-[11px] text-gray-400">Best performer</div>
+                          <div className="text-white font-semibold">
+                            {(() => {
+                              const entries = Object.entries(autopilotPerformance).map(([strategy, stats]) => ({ strategy, ...stats }));
+                              const ranked = entries
+                                .filter((item) => item.wins + item.losses > 0)
+                                .sort((a, b) => (b.wins / Math.max(1, a.wins + a.losses)) - (a.wins / Math.max(1, a.wins + a.losses)));
+                              return ranked[0]?.strategy ? `${ranked[0].strategy} (${Math.round((ranked[0].wins / Math.max(1, ranked[0].wins + ranked[0].losses)) * 100)}% win)` : "n/a";
+                            })()}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[11px] text-gray-400">Weakest performer</div>
+                          <div className="text-white font-semibold">
+                            {(() => {
+                              const entries = Object.entries(autopilotPerformance).map(([strategy, stats]) => ({ strategy, ...stats }));
+                              const ranked = entries
+                                .filter((item) => item.wins + item.losses > 0)
+                                .sort((a, b) => (a.wins / Math.max(1, a.wins + a.losses)) - (b.wins / Math.max(1, b.wins + b.losses)));
+                              return ranked[0]?.strategy ? `${ranked[0].strategy} (${Math.round((ranked[0].wins / Math.max(1, ranked[0].wins + ranked[0].losses)) * 100)}% win)` : "n/a";
+                            })()}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mt-3 text-[10px] text-gray-400">
+                        {Object.values(autopilotPerformance).reduce((sum, stats) => sum + stats.wins + stats.losses + stats.pending, 0)} trade outcomes recorded total.
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-brand-border/40 bg-slate-950/70 p-3 text-[10px] text-gray-300">
+                      <div className="text-[11px] text-gray-400 mb-2 uppercase tracking-[0.2em] font-semibold">Hot symbols</div>
+                      {(() => {
+                        const entries = Object.entries(symbolPerformance).map(([symbol, stats]) => ({ symbol, ...stats }));
+                        const ranked = entries
+                          .filter((item) => item.wins + item.losses > 0)
+                          .sort((a, b) => (b.wins / Math.max(1, a.wins + a.losses)) - (a.wins / Math.max(1, a.wins + a.losses)));
+                        const best = ranked[0];
+                        const worst = ranked[ranked.length - 1];
+                        return (
+                          <div className="space-y-2">
+                            <div>
+                              <div className="text-[10px] text-gray-400">Best symbol</div>
+                              <div className="text-white font-semibold">{best ? `${best.symbol} ${Math.round((best.wins / Math.max(1, best.wins + best.losses)) * 100)}% win` : "n/a"}</div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-gray-400">Weakest symbol</div>
+                              <div className="text-white font-semibold">{worst ? `${worst.symbol} ${Math.round((worst.wins / Math.max(1, worst.wins + worst.losses)) * 100)}% win` : "n/a"}</div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </div>
                   <div className="bg-brand-bg rounded-lg border border-brand-border p-2.5 max-h-[140px] overflow-y-auto space-y-1 text-[10px] font-mono leading-relaxed" id="autopilot-logs-display">
                     {autopilotLogs.map((lg) => {
                       let col = "text-gray-450 text-gray-400";
