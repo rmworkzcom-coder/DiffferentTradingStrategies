@@ -952,7 +952,6 @@ export default function MarketTerminal() {
   const networkFailureStrikeRef = useRef<number>(0);
   const networkFailureResumeAtRef = useRef<number>(0);
   const autopilotFailureStrikeRef = useRef<number>(0);
-  const autopilotFailureResumeAtRef = useRef<number>(0);
   const lastErrorOutcomeAtRef = useRef<number>(0);;
   const autopilotPositionOpenedAtRef = useRef<Record<string, { openedAt: number; entryPrice: number }>>({});
   const autopilotPriceWindowRef = useRef<Record<string, number[]>>({});
@@ -2704,17 +2703,8 @@ export default function MarketTerminal() {
       const strikes = autopilotFailureStrikeRef.current;
       if (strikes >= 3) {
         autopilotFailureStrikeRef.current = 0;
-        autopilotFailureResumeAtRef.current = Date.now() + AUTOPILOT_FAILURE_PAUSE_MS;
-        setIsAutopilotActive(false);
-        addAutopilotLog(`Autopilot paused for ${AUTOPILOT_FAILURE_PAUSE_MS / 1000}s after ${strikes} consecutive trade failures.`, "warn");
-        addLog("SYSTEM", "AUTOPILOT_AUTO_PAUSED", `Autopilot paused after ${strikes} consecutive trade failures — will auto-resume in ${AUTOPILOT_FAILURE_PAUSE_MS / 1000}s.`, "WARNING");
-        setTimeout(() => {
-          if (autopilotFailureResumeAtRef.current > 0 && Date.now() >= autopilotFailureResumeAtRef.current - 5000) {
-            autopilotFailureResumeAtRef.current = 0;
-            setIsAutopilotActive(true);
-            addAutopilotLog("Autopilot auto-resumed after error pause.", "info");
-          }
-        }, AUTOPILOT_FAILURE_PAUSE_MS + 1000);
+        addAutopilotLog(`Autopilot has recorded ${strikes} consecutive trade failures. Continuing to run and monitor for recovery.`, "warn");
+        addLog("SYSTEM", "AUTOPILOT_FAILURE_WARNING", `Autopilot experienced ${strikes} consecutive failures but remains active.`, "WARNING");
       }
     } else if (outcome.status === "FILLED" || outcome.status === "PENDING") {
       autopilotFailureStrikeRef.current = 0;
