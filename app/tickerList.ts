@@ -1,0 +1,22 @@
+export const quickTickers = [
+  "AAPL", "MSFT", "AMZN", "NVDA", "GOOG", "META", "TSLA", "BRK.B", "JPM", "JNJ",
+  "V", "UNH", "PG", "MA", "HD", "BAC", "XOM", "CVX", "LLY", "PFE",
+  "MRK", "KO", "PEP", "AVGO", "CSCO", "COST", "ADBE", "DIS", "ABT", "CRM",
+  "T", "MCD", "ORCL", "NKE", "IBM", "WMT", "ACN", "PM", "TXN", "NEE",
+  "MDT", "QCOM", "LIN", "SNY", "UPS", "HON", "RTX", "AXP", "LOW", "DHR",
+  "AMGN", "UNP", "TMO", "CVS", "TMUS", "INTU", "USB", "BLK", "GS", "GE",
+  "CAT", "SCHW", "AMD", "NOW", "ADP", "PLD", "CI", "SPGI", "COP", "MMM",
+  "AMT", "ISRG", "GILD", "LMT", "MDLZ", "TJX", "EL", "CMCSA", "ZTS", "SNOW",
+  "MU", "SBUX", "BKNG", "VRTX", "DE", "SO", "CL", "MELI", "JD", "BDX",
+  "TGT", "FIS", "EOG", "C", "DUK", "CSX", "BMY", "HDB", "AZN", "GM",
+  "F", "ADM", "SYK", "KHC", "NEM", "AMCR", "HPE", "ROST", "EA", "MNST",
+  "SHW", "EW", "GD", "PAYX", "APD", "DD", "DDOG", "AON", "CHTR", "BBY",
+  "TWTR", "UBER", "LYFT", "ZM", "DOCU", "PLTR", "CRWD", "NET", "OKTA", "PATH",
+  "MDB", "SNAP", "PINS", "ETSY", "ROKU", "SQ", "PYPL", "SHOP", "TWLO", "WORK",
+  "ZS", "FSLY", "BA", "UAL", "DAL", "AAL", "LUV", "MAR", "HLT", "WYNN",
+  "BK", "CME", "ICE", "PNC", "TFC", "CFG", "CMA", "FITB", "RF", "KEY",
+  "WFC", "MS", "BEN", "TROW", "IVZ", "VLO", "PSX", "HES", "MPC", "KMI",
+  "ETR", "AEP", "D", "PNW", "AEE", "ES", "XEL", "ED", "PEG", "SRE",
+  "ESRT", "EIX", "PPL", "NRG", "RE", "WEC", "DTE", "AWK", "CNP", "PCG",
+  "OGE", "FE", "SLB", "HAL", "BKR", "NOV", "FTI", "OXY", "APA", "PAA"
+];
