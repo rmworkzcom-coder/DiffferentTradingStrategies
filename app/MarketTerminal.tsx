@@ -231,6 +231,14 @@ function PositionSparkline({ symbol, currentPl, totalCost }: { symbol: string; c
   );
 }
 
+function isCryptoSymbol(sym: string): boolean {
+  return /(BTCUSD|ETHUSD|LTCUSD|BCHUSD|SOLUSD|DOGEUSD|AVAXUSD)$/i.test(sym);
+}
+
+function normalizeSymbol(sym: string): string {
+  return String(sym || "").toUpperCase().trim();
+}
+
 // Simple async mutex to serialize critical autopilot order paths and avoid race conditions
 class AsyncMutex {
   private _locked = false;
@@ -1020,7 +1028,7 @@ export default function MarketTerminal() {
     return `${yyyy}-${mm}-${dd}`;
   }, []);
 
-  const getEstimatedCostBps = useCallback(() => {
+  const getEstimatedCostBps = useCallback((sym: string) => {
     return 8;
   }, []);
 
@@ -1269,7 +1277,6 @@ export default function MarketTerminal() {
     maxExposurePercentPerSymbol,
     maxConcurrentPositions,
     liveMinOrderQty,
-    liveMinCryptoOrderQty
   });
 
   useEffect(() => {
@@ -1306,10 +1313,7 @@ export default function MarketTerminal() {
       minAvgVolume,
       maxExposurePercentPerSymbol,
       maxConcurrentPositions,
-      maxConcurrentCryptoPositions,
       liveMinOrderQty,
-      liveMinCryptoOrderQty,
-      autopilotCryptoOnly,
       blockedMarkets,
     };
   }, [
@@ -1406,11 +1410,11 @@ export default function MarketTerminal() {
       if (side === 'BUY') {
         if (curBlocked.india && isIndia) {
           addAutopilotLog(`Blocked BUY ${symbolClean}: India market trading is disabled.`, 'warn');
-          return { status: 'BLOCKED', code: 'BLOCKED_MARKET_BLOCKED', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'India market trading disabled.' };
+          return { status: 'BLOCKED', code: 'BLOCKED_MARKET_CLOSED', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'India market trading disabled.' };
         }
         if (curBlocked.wallStreet && isWallStreet) {
           addAutopilotLog(`Blocked BUY ${symbolClean}: Wall Street trading is disabled.`, 'warn');
-          return { status: 'BLOCKED', code: 'BLOCKED_MARKET_BLOCKED', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Wall Street trading disabled.' };
+          return { status: 'BLOCKED', code: 'BLOCKED_MARKET_CLOSED', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Wall Street trading disabled.' };
         }
       }
     } catch (e) { /* ignore */ }
@@ -1567,7 +1571,7 @@ export default function MarketTerminal() {
         const _limitEarly = curRef.maxConcurrentPositions || 999;
         const _openRelevantEarly = _openCountEarlyAll;
         if (side === "BUY" && !_existingLongEarly && _openRelevantEarly + _pendingCount >= _limitEarly) {
-          console.warn(`Autopilot concurrency block for ${symbolClean}: openRelevantEarly=${_openRelevantEarly}, pending=${_pendingCount}, limit=${_limitEarly}, openAll=${_openCountEarlyAll}, openCrypto=${_openCountEarlyCrypto}`);
+          console.warn(`Autopilot concurrency block for ${symbolClean}: openRelevantEarly=${_openRelevantEarly}, pending=${_pendingCount}, limit=${_limitEarly}, openAll=${_openCountEarlyAll}`);
           addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${_limitEarly}) reached (open ${_openRelevantEarly} + pending ${_pendingCount}).`, "warn");
           addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: concurrent positions limit reached (open ${_openRelevantEarly} + pending ${_pendingCount}).`, "WARNING");
           return {
@@ -1595,8 +1599,8 @@ export default function MarketTerminal() {
       const limit = curRef.maxConcurrentPositions || 999;
       const openRelevant = openCountAll;
       if (side === "BUY" && !existingLong && openRelevant >= limit) {
-        console.warn(`Autopilot concurrency block for ${symbolClean}: openRelevant=${openRelevant}, limit=${limit}, openAll=${openCountAll}, openCrypto=${openCountCrypto}`);
-        addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${limit}) reached (open ${openRelevant} total / crypto ${openCountCrypto}).`, "warn");
+        console.warn(`Autopilot concurrency block for ${symbolClean}: openRelevant=${openRelevant}, limit=${limit}, openAll=${openCountAll}`);
+        addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${limit}) reached.`, "warn");
         addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: concurrent positions limit reached.`, "WARNING");
         return {
           status: "BLOCKED",
@@ -1619,9 +1623,7 @@ export default function MarketTerminal() {
       if (side === "BUY" && (newExposurePct > (curRef.maxExposurePercentPerSymbol || 100))) {
         const capPct = curRef.maxExposurePercentPerSymbol || 100;
         const maxAdditionalValue = (totalPortfolio * (capPct / 100)) - currentPosVal;
-        const minExecutableQty = symbolClean === "BTCUSD"
-          ? Math.max(0.000001, Number(curRef.liveMinCryptoOrderQty) || 0.0001)
-          : Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.01);
+        const minExecutableQty = Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.01);
 
         if (maxAdditionalValue <= 0) {
           addAutopilotLog(`🚫 Blocked BUY ${symbolClean}: current exposure already at or above ${capPct}% cap.`, "warn");
@@ -1801,9 +1803,7 @@ export default function MarketTerminal() {
                 finalQty = parseFloat(safeQty.toFixed(2));
               }
 
-              if (finalQty <= (symbolClean === "BTCUSD"
-                ? Math.max(0.000001, Number(curRef.liveMinCryptoOrderQty) || 0.0001)
-                : Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.01))) {
+              if (finalQty <= Math.max(0.0001, Number(curRef.liveMinOrderQty) || 0.01)) {
                 addAutopilotLog(`Blocked live automated BUY: Affordable size ${finalQty} for ${symbolClean} is negligible. BP: ${maxAllowedPower.toFixed(2)} (safe cap: ${maxSafeOrderVal.toFixed(2)}), price: ${estPrice.toFixed(2)}.`, "warn");
                 addLog(symbolClean, "AUTO_BUY_BLOCKED", `Affordable size ${finalQty} is too small to execute. Balance: ${maxAllowedPower.toFixed(2)}.`, "WARNING");
                 return {
@@ -2049,9 +2049,7 @@ export default function MarketTerminal() {
             };
             const tinyOrderTimeoutMs = 15000;
             const standardOrderTimeoutMs = 45000;
-            const isTinyOrder = symbolClean === "BTCUSD"
-              ? finalQty <= Math.max(0.002, (Number(curRef.liveMinCryptoOrderQty) || 0.0001) * 4)
-              : finalQty <= Math.max(0.25, (Number(curRef.liveMinOrderQty) || 0.01) * 10);
+            const isTinyOrder = finalQty <= Math.max(0.25, (Number(curRef.liveMinOrderQty) || 0.01) * 10);
             const pendingClearTimeoutMs = isTinyOrder ? tinyOrderTimeoutMs : standardOrderTimeoutMs;
             // Avoid sticky pending state forever when broker status updates are delayed.
             setTimeout(() => {
@@ -2849,9 +2847,7 @@ export default function MarketTerminal() {
         const liveBudget = isLiveMode
           ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.20)
           : 0;
-        const liveMinQty = targetSymbol === "BTCUSD"
-          ? Math.max(0.0001, Number(curRef.liveMinCryptoOrderQty) || 0.0001)
-          : Math.max(0.01, Number(curRef.liveMinOrderQty) || 0.01);
+        const liveMinQty = Math.max(0.01, Number(curRef.liveMinOrderQty) || 0.01);
         const budgetQtyRaw = currentSpotPrice > 0 ? liveBudget / currentSpotPrice : 0;
         const liveQtyByBudget = targetSymbol === "BTCUSD"
           ? parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(4))
