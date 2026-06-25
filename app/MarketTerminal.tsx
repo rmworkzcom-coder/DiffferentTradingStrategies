@@ -2617,8 +2617,12 @@ export default function MarketTerminal() {
       const strikes = autopilotFailureStrikeRef.current;
       if (strikes >= 3) {
         autopilotFailureStrikeRef.current = 0;
-        addAutopilotLog(`Autopilot has recorded ${strikes} consecutive trade failures. Continuing to run and monitor for recovery.`, "warn");
-        addLog("SYSTEM", "AUTOPILOT_FAILURE_WARNING", `Autopilot experienced ${strikes} consecutive failures but remains active.`, "WARNING");
+        const pauseUntil = Date.now() + AUTOPILOT_FAILURE_PAUSE_MS;
+        networkFailureResumeAtRef.current = pauseUntil;
+        networkFailurePauseLogRef.current = pauseUntil;
+        setAutopilotScanError(`Autopilot paused after ${strikes} consecutive trade failures. Resuming in ${Math.floor(AUTOPILOT_FAILURE_PAUSE_MS / 1000)}s.`);
+        addAutopilotLog(`Autopilot has recorded ${strikes} consecutive trade failures. Pausing scans for ${Math.floor(AUTOPILOT_FAILURE_PAUSE_MS / 1000)}s.`, "warn");
+        addLog("SYSTEM", "AUTOPILOT_FAILURE_WARNING", `Autopilot experienced ${strikes} consecutive failures and paused for recovery.`, "WARNING");
       }
     } else if (outcome.status === "FILLED" || outcome.status === "PENDING") {
       autopilotFailureStrikeRef.current = 0;
@@ -5395,8 +5399,12 @@ export default function MarketTerminal() {
           }
           
           let successCount = 0;
+          let failureCount = 0;
           for (const pos of alpacaPositions) {
-            if (pos.qty <= 0) continue;
+            if (pos.qty === 0) continue;
+            const isLongPosition = pos.qty > 0;
+            const qtyToClose = Math.abs(pos.qty);
+            const closeSide = isLongPosition ? "sell" : "buy";
             try {
               const response = await fetch("/api/angelone/trade", {
                 method: "POST",
@@ -5407,35 +5415,63 @@ export default function MarketTerminal() {
                   angelMpin,
                   angelTotpSeed,
                   symbol: pos.symbol,
-                  qty: pos.qty,
-                  side: "sell",
+                  qty: qtyToClose,
+                  side: closeSide,
                   isMockConnection: !angelApiKey || !angelClientCode,
                   useServerCreds: angelUseServerCreds,
                 }),
               });
-              
-              if (response.ok) {
-                const data = await response.json();
-                if (!data.error) {
-                  successCount++;
-                  addLog(pos.symbol, "LIQUIDATED", `Asset successfully sold ${pos.qty} shares.`, "SUCCESS");
-                  if (isLossMakingPosition(pos)) {
-                    armLiquidationCooldown(pos.symbol, "portfolio liquidation");
-                  }
-                }
+
+              const resText = await response.text();
+              let data: any = null;
+              try {
+                data = JSON.parse(resText);
+              } catch {
+                data = null;
+              }
+
+              if (!response.ok || data?.error) {
+                failureCount++;
+                const errorMsg = data?.error || `Liquidation failed for ${pos.symbol}.`;
+                addLog(pos.symbol, "LIQUIDATION_FAILED", errorMsg, "CRITICAL");
+                console.error(`Sub-liquidation failed for ${pos.symbol}:`, errorMsg);
+                continue;
+              }
+
+              successCount++;
+              addLog(pos.symbol, "LIQUIDATED", `Position successfully closed: ${qtyToClose} shares ${closeSide.toUpperCase()}.`, "SUCCESS");
+              if (isLossMakingPosition(pos)) {
+                armLiquidationCooldown(pos.symbol, "portfolio liquidation");
               }
             } catch (posErr) {
+              failureCount++;
               console.error(`Sub-liquidation failed for ${pos.symbol}:`, posErr);
+              addLog(pos.symbol, "LIQUIDATION_FAILED", String(posErr.message || posErr), "CRITICAL");
             }
           }
-          
-          addLog("PORTFOLIO", "LIQUIDATION_COMPLETE", `Completed global liquidation. Closed out ${successCount} NSE holdings.`, "SUCCESS");
-          
+
+          if (successCount === 0 && failureCount > 0) {
+            throw new Error(`Portfolio liquidation failed for ${failureCount} positions.`);
+          }
+
+          addLog(
+            "PORTFOLIO",
+            "LIQUIDATION_COMPLETE",
+            failureCount > 0
+              ? `Completed global liquidation with partial success: closed out ${successCount} holdings, ${failureCount} failed.`
+              : `Completed global liquidation. Closed out ${successCount} NSE holdings.`,
+            failureCount > 0 ? "WARNING" : "SUCCESS"
+          );
+
           setTimeout(() => {
             handleRefreshData();
           }, 1500);
         } else {
           // Alpaca direct delete-all-positions route
+          if (alpacaPositions.length === 0) {
+            throw new Error("No active positions to liquidate.");
+          }
+
           const response = await fetch("/api/alpaca/liquidate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
