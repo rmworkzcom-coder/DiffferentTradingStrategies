@@ -617,8 +617,7 @@ export default function MarketTerminal() {
   const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
   const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
-  const [autopilotCryptoOnly, setAutopilotCryptoOnly] = useState<boolean>(false);
-  const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean; india: boolean; crypto: boolean }>({ wallStreet: false, india: false, crypto: true });
+  const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean; india: boolean }>({ wallStreet: false, india: false });
   const [autopilotAutoSwitchEnabled, setAutopilotAutoSwitchEnabled] = useState<boolean>(true);
   const [activeVisualizerSymbol] = useState<string>("");
 
@@ -630,11 +629,9 @@ export default function MarketTerminal() {
   const [minAvgVolume, setMinAvgVolume] = useState<number>(1000000); // minimum average daily volume
   const [maxExposurePercentPerSymbol, setMaxExposurePercentPerSymbol] = useState<number>(65); // percent of portfolio per symbol
   const [maxConcurrentPositions, setMaxConcurrentPositions] = useState<number>(5); // concurrent open positions
-  const [maxConcurrentCryptoPositions, setMaxConcurrentCryptoPositions] = useState<number>(3); // concurrent open crypto positions
   const [autoLiquidateBeforeClose, setAutoLiquidateBeforeClose] = useState<boolean>(false);
   const [liquidationBeforeCloseMin, setLiquidationBeforeCloseMin] = useState<number>(5);
-  const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum non-crypto live order size
-  const [liveMinCryptoOrderQty, setLiveMinCryptoOrderQty] = useState<number>(0.0001); // minimum crypto live order size
+  const [liveMinOrderQty, setLiveMinOrderQty] = useState<number>(0.01); // minimum live order size
   const [aggressiveDeleverage, setAggressiveDeleverage] = useState<boolean>(false);
   const [hasLoadedPersistentSettings, setHasLoadedPersistentSettings] = useState<boolean>(false);
 
@@ -675,9 +672,7 @@ export default function MarketTerminal() {
       const minAvgVolStored = typeof window !== "undefined" && localStorage.getItem("sentry:minAvgVol");
       const maxExposureStored = typeof window !== "undefined" && localStorage.getItem("sentry:maxExposurePct");
       const minLiveQty = typeof window !== "undefined" && localStorage.getItem("sentry:liveMinQty");
-      const minLiveCryptoQty = typeof window !== "undefined" && localStorage.getItem("sentry:liveMinCryptoQty");
       const maxConcurrentStored = typeof window !== "undefined" && localStorage.getItem("sentry:maxConcurrent");
-      const maxConcurrentCryptoStored = typeof window !== "undefined" && localStorage.getItem("sentry:maxConcurrentCrypto");
       const broadScan = typeof window !== "undefined" && localStorage.getItem("sentry:scanBroadUniverse");
       const blockedMarketsStored = typeof window !== "undefined" && localStorage.getItem("sentry:blockedMarkets");
       const lossGuardStored = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotLossGuard");
@@ -716,14 +711,9 @@ export default function MarketTerminal() {
         if (Number.isFinite(n)) setMaxExposurePercentPerSymbol(Math.max(1, Math.min(100, n)));
       }
       if (minLiveQty) setLiveMinOrderQty(Math.max(0.0001, parseFloat(minLiveQty)));
-      if (minLiveCryptoQty) setLiveMinCryptoOrderQty(Math.max(0.000001, parseFloat(minLiveCryptoQty)));
       if (maxConcurrentStored !== null && maxConcurrentStored !== false) {
         const val = parseInt(maxConcurrentStored as string);
         if (Number.isFinite(val)) setMaxConcurrentPositions(Math.max(1, val));
-      }
-      if (maxConcurrentCryptoStored !== null && maxConcurrentCryptoStored !== false) {
-        const val = parseInt(maxConcurrentCryptoStored as string);
-        if (Number.isFinite(val)) setMaxConcurrentCryptoPositions(Math.max(1, val));
       }
       const autoLiquidateStored = typeof window !== "undefined" && localStorage.getItem("sentry:autoLiquidateBeforeClose");
       const liquidationMinStored = typeof window !== "undefined" && localStorage.getItem("sentry:liquidationBeforeCloseMin");
@@ -747,7 +737,6 @@ export default function MarketTerminal() {
           setBlockedMarkets({
             wallStreet: !!parsed.wallStreet,
             india: !!parsed.india,
-            crypto: true,
           });
         } catch (e) {}
       }
@@ -763,6 +752,9 @@ export default function MarketTerminal() {
       setHasLoadedPersistentSettings(true);
     }
   }, []);
+
+  useEffect(() => {
+    try {
       if (typeof window !== "undefined") {
         localStorage.setItem("sentry:autopilotInterval", String(autopilotInterval));
         localStorage.setItem("sentry:autopilotFailurePauseSeconds", String(autopilotFailurePauseSeconds));
@@ -785,9 +777,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:minAvgVol", String(minAvgVolume));
         localStorage.setItem("sentry:maxExposurePct", String(maxExposurePercentPerSymbol));
         localStorage.setItem("sentry:maxConcurrent", String(maxConcurrentPositions));
-        localStorage.setItem("sentry:maxConcurrentCrypto", String(maxConcurrentCryptoPositions));
         localStorage.setItem("sentry:liveMinQty", String(liveMinOrderQty));
-        localStorage.setItem("sentry:liveMinCryptoQty", String(liveMinCryptoOrderQty));
         localStorage.setItem("sentry:autoLiquidateBeforeClose", String(autoLiquidateBeforeClose));
         localStorage.setItem("sentry:liquidationBeforeCloseMin", String(liquidationBeforeCloseMin));
         localStorage.setItem("sentry:aggressiveDeleverage", JSON.stringify(aggressiveDeleverage));
@@ -803,7 +793,7 @@ export default function MarketTerminal() {
         localStorage.setItem("sentry:isTickStreamActive", String(isTickStreamActive));
       }
     } catch (e) {}
-  }, [hasLoadedPersistentSettings, autopilotStrategy, autopilotTargetTicker, autopilotAutoStart, warnThreshold, criticalThreshold, globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, maxConcurrentCryptoPositions, liveMinOrderQty, liveMinCryptoOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, autopilotCryptoOnly, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin, autopilotLossGuard, autopilotFailurePauseSeconds, autopilotBlacklist, tradeFormTab, isTickStreamActive]);
+  }, [hasLoadedPersistentSettings, autopilotStrategy, autopilotTargetTicker, autopilotAutoStart, warnThreshold, criticalThreshold, globalTakeProfitPercent, globalStopLossPercent, minAvgVolume, maxExposurePercentPerSymbol, maxConcurrentPositions, liveMinOrderQty, aggressiveDeleverage, autopilotScanBroadUniverse, autopilotAutoSwitchEnabled, blockedMarkets, allowLiveShorts, positionsView, autoLiquidateBeforeClose, liquidationBeforeCloseMin, autopilotLossGuard, autopilotFailurePauseSeconds, autopilotBlacklist, tradeFormTab, isTickStreamActive]);
 
   // Crypto-only auto-switch removed: non-crypto buys are allowed at all times unless explicitly blocked.
 
@@ -992,20 +982,6 @@ export default function MarketTerminal() {
     return false;
   }, []);
 
-  const isCryptoSymbol = useCallback((s: string) => {
-    if (!s) return false;
-    let u = String(s).toUpperCase().trim().replace(/[^A-Z0-9]/g, "");
-    // normalize common crypto shorthands such as ETHD -> ETHUSDT
-    if (u.endsWith("D") && !u.endsWith("USD") && u.length > 1) {
-      u = `${u.slice(0, -1)}USDT`;
-    }
-    // treat obvious pairs and suffixes; avoid broad substring matches
-    if (u.endsWith("USD") || u.endsWith("USDT")) return true;
-    const explicit = ["BTCUSD","ETHUSD","BTCUSDT","ETHUSDT","LTCUSD","XRPUSD","DOGEUSD","ETHBTC","BTCETH"];
-    if (explicit.includes(u)) return true;
-    return false;
-  }, []);
-
   const autopilotScanList = useMemo(() => {
     const parsedTargets = (autopilotTargetTicker || "AAPL")
       .split(/[\s,]+/)
@@ -1013,12 +989,11 @@ export default function MarketTerminal() {
       .filter(Boolean);
     const blacklistSet = new Set((autopilotBlacklist || []).map((s) => s.toUpperCase()));
     const broadUniverseTargets = autopilotScanBroadUniverse ? quickTickers.map((s) => s.toUpperCase()) : [];
-    const isAllowedScanSymbol = (sym: string) => !isCryptoSymbol(sym);
     const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
     const nowTs = Date.now();
     const isLossGuardTemporarilyBlocked = (sym: string) => (autopilotLossGuardBlockedUntilRef.current[sym] || 0) > nowTs;
 
-    let scanTargets = baseTargets.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym) && isAllowedScanSymbol(sym));
+    let scanTargets = baseTargets.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
     const marketSessionNow = getMarketSessionET();
     if (marketSessionNow === "CLOSED") {
       scanTargets = [];
@@ -1026,35 +1001,15 @@ export default function MarketTerminal() {
 
     if (scanTargets.length === 0) {
       const dynamicPool = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...quickTickers.map((s) => s.toUpperCase())]));
-      scanTargets = dynamicPool.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym) && isAllowedScanSymbol(sym));
+      scanTargets = dynamicPool.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
     }
 
     return scanTargets;
-  }, [autopilotTargetTicker, autopilotScanBroadUniverse, autopilotBlacklist, quickTickers, isCryptoSymbol]);
+  }, [autopilotTargetTicker, autopilotScanBroadUniverse, autopilotBlacklist, quickTickers]);
 
   const computeOpenCounts = useCallback((positions: any[]) => {
     const all = (positions || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
-    const crypto = (positions || []).filter((p: any) => {
-      try { return parseFloat(p.qty || 0) > 0 && isCryptoSymbol(String(p.symbol || "")); } catch (e) { return false; }
-    }).length;
-    return { all, crypto };
-  }, [isCryptoSymbol]);
-
-  // Normalize symbol to exchange-friendly form (e.g. ETH -> ETHUSD, ETHd -> ETHUSD)
-  const normalizeSymbol = useCallback((s: string) => {
-    if (!s) return s;
-    let u = String(s).toUpperCase().trim();
-    // strip non-alphanumeric characters
-    u = u.replace(/[^A-Z0-9]/g, "");
-    // if bare token like "ETH", prefer USDT pair for crypto
-    if (/^[A-Z]{2,5}$/.test(u) && !u.endsWith("USD") && !u.endsWith("USDT")) {
-      return `${u}USDT`;
-    }
-    // common typo: trailing single 'D' (e.g. ETHd) -> USDT
-    if (u.endsWith("D") && !u.endsWith("USD") && u.length > 1) {
-      return `${u.slice(0, -1)}USDT`;
-    }
-    return u;
+    return { all };
   }, []);
 
   const getEtDayKey = useCallback(() => {
@@ -1065,28 +1020,17 @@ export default function MarketTerminal() {
     return `${yyyy}-${mm}-${dd}`;
   }, []);
 
-  const getEstimatedCostBps = useCallback((symbol: string) => {
-    return isCryptoSymbol(symbol) ? 18 : 8;
-  }, [isCryptoSymbol]);
+  const getEstimatedCostBps = useCallback(() => {
+    return 8;
+  }, []);
 
   // Calculate autopilot trade quantity based on broker type, symbol, and trend strength
   const getAutopilotTradeQty = useCallback((symbol: string, isAlpaca: boolean) => {
-    const isCrypto = isCryptoSymbol(symbol);
-    const baseQty = isAlpaca
-      ? symbol === "BTCUSD"
-        ? 0.05
-        : isCrypto
-        ? 0.05
-        : 20
-      : symbol === "BTCUSD"
-      ? 0.1
-      : isCrypto
-      ? 0.5
-      : 15;
+    const baseQty = isAlpaca ? 20 : 15;
 
     const stats = autopilotMarketStatsRef.current[symbol];
     if (!stats) {
-      return baseQty;
+      return parseFloat(baseQty.toFixed(2));
     }
 
     const trendBoost = Math.max(0, stats.trendStrength - 0.45) * 0.8;
@@ -1097,14 +1041,8 @@ export default function MarketTerminal() {
     const multiplier = Math.min(2.5, 1 + trendBoost + edgeBoost) * chopPenalty * atrPenalty;
     const adjustedQty = Math.max(baseQty, baseQty * multiplier);
 
-    if (isCrypto) {
-      return symbol === "BTCUSD"
-        ? parseFloat(adjustedQty.toFixed(4))
-        : parseFloat(adjustedQty.toFixed(3));
-    }
-
     return parseFloat(adjustedQty.toFixed(2));
-  }, [isCryptoSymbol]);
+  }, []);
 
   const ensureDailyGuardWindow = useCallback(() => {
     const dayKey = getEtDayKey();
@@ -1406,11 +1344,8 @@ export default function MarketTerminal() {
     minAvgVolume,
     maxExposurePercentPerSymbol,
     maxConcurrentPositions,
-    maxConcurrentCryptoPositions,
     autopilotBlacklist,
     liveMinOrderQty,
-    liveMinCryptoOrderQty,
-    autopilotCryptoOnly,
     blockedMarkets,
   ]);
 
@@ -1431,19 +1366,6 @@ export default function MarketTerminal() {
     }
     symbolClean = symbolClean.toUpperCase().trim();
 
-    if (isCryptoSymbol(symbolClean)) {
-      addAutopilotLog(`Blocked ${side} ${symbolClean}: crypto trading is disabled in this terminal app.`, "warn");
-      return {
-        status: "BLOCKED",
-        code: "BLOCKED_CRYPTO_DISABLED",
-        symbol: symbolClean,
-        side,
-        requestedQty: qtyNum,
-        executedQty: 0,
-        message: "Crypto trading is disabled in this terminal app."
-      };
-    }
-
     if (side === "BUY") {
       const cooldownUntil = autopilotBuyCooldownUntilRef.current[symbolClean] || 0;
       if (cooldownUntil > Date.now()) {
@@ -1462,14 +1384,13 @@ export default function MarketTerminal() {
 
     // Market-block / crypto-only enforcement
     try {
-      const curBlocked = curRef.blockedMarkets || { wallStreet: false, india: false, crypto: false };
-      const isCrypto = isCryptoSymbol(symbolClean);
+      const curBlocked = curRef.blockedMarkets || { wallStreet: false, india: false };
       const isIndia = symbolClean.endsWith('.NS') || symbolClean.endsWith('.BO') || curRef.brokerType === 'ANGELONE';
-      const isWallStreet = !isCrypto && !isIndia;
+      const isWallStreet = !isIndia;
 
       // Hard guard: when Wall Street session is closed, block non-crypto autopilot orders.
       const marketSessionNow = getMarketSessionET();
-      if (marketSessionNow === "CLOSED" && !isCrypto) {
+      if (marketSessionNow === "CLOSED") {
         addAutopilotLog(`Blocked ${side} ${symbolClean}: market session is CLOSED (ET).`, "warn");
         return {
           status: "BLOCKED",
@@ -1482,19 +1403,14 @@ export default function MarketTerminal() {
         };
       }
 
-      // crypto-only enforcement removed: allow non-crypto BUYs unless explicitly blocked by market blocks
       if (side === 'BUY') {
-        if (curBlocked.crypto && isCrypto) {
-          addAutopilotLog(`Blocked BUY ${symbolClean}: crypto trading is disabled by market block.`, 'warn');
-          return { status: 'BLOCKED', code: 'BLOCKED_CRYPTO_ONLY', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Crypto trading disabled.' };
-        }
         if (curBlocked.india && isIndia) {
           addAutopilotLog(`Blocked BUY ${symbolClean}: India market trading is disabled.`, 'warn');
-          return { status: 'BLOCKED', code: 'BLOCKED_CRYPTO_ONLY', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'India market trading disabled.' };
+          return { status: 'BLOCKED', code: 'BLOCKED_MARKET_BLOCKED', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'India market trading disabled.' };
         }
         if (curBlocked.wallStreet && isWallStreet) {
           addAutopilotLog(`Blocked BUY ${symbolClean}: Wall Street trading is disabled.`, 'warn');
-          return { status: 'BLOCKED', code: 'BLOCKED_CRYPTO_ONLY', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Wall Street trading disabled.' };
+          return { status: 'BLOCKED', code: 'BLOCKED_MARKET_BLOCKED', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Wall Street trading disabled.' };
         }
       }
     } catch (e) { /* ignore */ }
@@ -1645,13 +1561,11 @@ export default function MarketTerminal() {
         const _activeEarly = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
         const _countsEarly = computeOpenCounts(_activeEarly);
         const _openCountEarlyAll = _countsEarly.all;
-        const _openCountEarlyCrypto = _countsEarly.crypto;
         const _existingLongEarly = _activeEarly.find((p: any) => p.symbol === symbolClean && parseFloat(p.qty || 0) > 0);
         const pendingSymbolsArr = Array.from(autopilotPendingBuySymbolsRef.current || []);
-        const _isCryptoEarly = isCryptoSymbol(symbolClean);
-        const _pendingCount = _isCryptoEarly ? pendingSymbolsArr.filter(s => isCryptoSymbol(s)).length : pendingSymbolsArr.filter(s => !isCryptoSymbol(s)).length;
-        const _limitEarly = _isCryptoEarly ? (curRef.maxConcurrentCryptoPositions || curRef.maxConcurrentPositions || 999) : (curRef.maxConcurrentPositions || 999);
-        const _openRelevantEarly = _isCryptoEarly ? _openCountEarlyCrypto : _openCountEarlyAll;
+        const _pendingCount = pendingSymbolsArr.length;
+        const _limitEarly = curRef.maxConcurrentPositions || 999;
+        const _openRelevantEarly = _openCountEarlyAll;
         if (side === "BUY" && !_existingLongEarly && _openRelevantEarly + _pendingCount >= _limitEarly) {
           console.warn(`Autopilot concurrency block for ${symbolClean}: openRelevantEarly=${_openRelevantEarly}, pending=${_pendingCount}, limit=${_limitEarly}, openAll=${_openCountEarlyAll}, openCrypto=${_openCountEarlyCrypto}`);
           addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${_limitEarly}) reached (open ${_openRelevantEarly} + pending ${_pendingCount}).`, "warn");
@@ -1676,12 +1590,10 @@ export default function MarketTerminal() {
 
       const counts = computeOpenCounts(activePositions || []);
       const openCountAll = counts.all;
-      const openCountCrypto = counts.crypto;
       const existingLong = activePositions.find((p: any) => p.symbol === symbolClean && parseFloat(p.qty || 0) > 0);
       // Allow adding to an already-open symbol even when the concurrent-position ceiling is reached.
-      const isCrypto = isCryptoSymbol(symbolClean);
-      const limit = isCrypto ? (curRef.maxConcurrentCryptoPositions || curRef.maxConcurrentPositions || 999) : (curRef.maxConcurrentPositions || 999);
-      const openRelevant = isCrypto ? openCountCrypto : openCountAll;
+      const limit = curRef.maxConcurrentPositions || 999;
+      const openRelevant = openCountAll;
       if (side === "BUY" && !existingLong && openRelevant >= limit) {
         console.warn(`Autopilot concurrency block for ${symbolClean}: openRelevant=${openRelevant}, limit=${limit}, openAll=${openCountAll}, openCrypto=${openCountCrypto}`);
         addAutopilotLog(`🧭 Blocked BUY ${symbolClean}: concurrent position limit (${limit}) reached (open ${openRelevant} total / crypto ${openCountCrypto}).`, "warn");
@@ -1700,8 +1612,7 @@ export default function MarketTerminal() {
       // Estimate current exposure and intended order value
       const matchedTicker = activePositions.find((p: any) => p.symbol === symbolClean) as any;
       const currentPosVal = matchedTicker ? parseFloat(matchedTicker.market_value || (matchedTicker.current_price * (parseFloat(matchedTicker.qty || 0) || 0)) || 0) : 0;
-      // Fallback price guess
-      const guessPrice = matchedTicker ? parseFloat(matchedTicker.current_price || 0) : (symbolClean === "BTCUSD" ? 67200 : 150);
+      const guessPrice = matchedTicker ? parseFloat(matchedTicker.current_price || 0) : 150;
       const intendedValue = Math.abs(qtyNum) * guessPrice;
       const newExposurePct = ((currentPosVal + intendedValue) / totalPortfolio) * 100;
 
@@ -4594,27 +4505,6 @@ export default function MarketTerminal() {
           let maxSafeOrderVal = 0;
           let preferredUsdt = 0;
           let preferredSource: "futures" | "spot" | "none" = "none";
-          const pref = await fetchBinanceFundingSnapshot();
-          const prefUsdt = pref.usdt;
-          const prefSource = pref.source === "futures" ? "futures" : "none";
-          preferredUsdt = prefSource === "futures" ? prefUsdt : 0;
-          preferredSource = prefSource;
-          if (prefSource !== "futures") {
-            addAutopilotLog(`Blocked ${symbolClean}: Binance futures USDT funding required. Current source = ${pref.source}.`, "warn");
-            return {
-              status: "BLOCKED",
-              code: "BLOCKED_INSUFFICIENT_USDT",
-              symbol: symbolClean,
-              side,
-              requestedQty: qtyNum,
-              executedQty: 0,
-              message: `Binance futures USDT funding required. Current source = ${pref.source}.`,
-            };
-          }
-          if (prefUsdt > 0) {
-            maxSafeOrderVal = prefUsdt * 0.9; // keep 10% buffer
-          }
-
           if (maxSafeOrderVal <= 0) {
             const cashValue = parseFloat(alpacaAccount?.cash || "0");
             const rawBuyingPower = parseFloat(alpacaAccount?.buying_power || "0");
@@ -4625,20 +4515,18 @@ export default function MarketTerminal() {
 
           if (intendedCost > maxSafeOrderVal) {
             setIsPlacingOrder(false);
-            setOrderError(`Blocked: insufficient buying power for ${normSymbol} order (~${intendedCost.toFixed(2)} required).`);
-            addLog(normSymbol, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`, "WARNING");
+            setOrderError(`Blocked: insufficient buying power for ${symbolClean} order (~${intendedCost.toFixed(2)} required).`);
+            addLog(symbolClean, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`, "WARNING");
             return;
           }
 
           const payload: any = {
-            symbol: normSymbol,
+            symbol: symbolClean,
             side: side,
             type: "MARKET",
             quantity: qtyToSend,
             isLive: true,
             openShort: attemptingOpenShort && allowLiveShorts,
-            preferredUsdt,
-            preferredSource,
           };
 
           const response = await fetch("/api/binance/trade", {
@@ -4656,14 +4544,14 @@ export default function MarketTerminal() {
           }
 
           if (!response.ok || dataOrder?.error) {
-            throw new Error(dataOrder?.error || "Order rejected by Binance proxy server.");
+            throw new Error(dataOrder?.error || "Order rejected by broker proxy server.");
           }
 
-          setOrderSuccess(`Binance order accepted: ${dataOrder.order?.clientOrderId || dataOrder.order?.orderId || 'submitted'}`);
-          addLog(symbolClean, `${side}_FILLED`, `Binance crypto order executed for ${qtyNum} ${symbolClean}.`, "SUCCESS");
+          setOrderSuccess(`Live order accepted: ${dataOrder.order?.clientOrderId || dataOrder.order?.orderId || 'submitted'}`);
+          addLog(symbolClean, `${side}_FILLED`, `Live order executed for ${qtyNum} ${symbolClean}.`, "SUCCESS");
 
           const newOrderObj: Order = {
-            id: dataOrder.order?.clientOrderId || dataOrder.order?.orderId || `bin-${Date.now()}`,
+            id: dataOrder.order?.clientOrderId || dataOrder.order?.orderId || `live-${Date.now()}`,
             symbol: symbolClean,
             side: side,
             qty: qtyNum,
@@ -4700,7 +4588,7 @@ export default function MarketTerminal() {
             return;
           }
 
-          addLog("BINANCE", side, `Transmitting Crypto Order to Binance: ${side} ${qtyNum} ${normSymbol} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
+          addLog("BROKER", side, `Transmitting ${side} ${qtyNum} ${symbolClean} via live broker.`, "INFO");
           try {
             // buying-power check for manual crypto orders (Binance) — prefer futures USDT via server
             const estPrice = alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
