@@ -972,13 +972,10 @@ export default function MarketTerminal() {
       .split(/[\s,]+/)
       .map((s) => s.trim().toUpperCase())
       .filter(Boolean);
-    const blacklistSet = new Set((autopilotBlacklist || []).map((s) => s.toUpperCase()));
     const broadUniverseTargets = autopilotScanBroadUniverse ? quickTickers.map((s) => s.toUpperCase()) : [];
     const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
-    const nowTs = Date.now();
-    const isLossGuardTemporarilyBlocked = (sym: string) => (autopilotLossGuardBlockedUntilRef.current[sym] || 0) > nowTs;
 
-    let scanTargets = baseTargets.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
+    let scanTargets = [...baseTargets];
     const marketSessionNow = getMarketSessionET();
     if (marketSessionNow === "CLOSED") {
       scanTargets = [];
@@ -986,11 +983,11 @@ export default function MarketTerminal() {
 
     if (scanTargets.length === 0) {
       const dynamicPool = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...quickTickers.map((s) => s.toUpperCase())]));
-      scanTargets = dynamicPool.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
+      scanTargets = [...dynamicPool];
     }
 
     return scanTargets;
-  }, [autopilotTargetTicker, autopilotScanBroadUniverse, autopilotBlacklist, quickTickers]);
+  }, [autopilotTargetTicker, autopilotScanBroadUniverse, quickTickers]);
 
   const computeOpenCounts = useCallback((positions: any[]) => {
     const all = (positions || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
@@ -1020,8 +1017,8 @@ export default function MarketTerminal() {
     const cashValue = isAlpaca ? parseFloat(curRef.alpacaAccount?.cash || "0") : parseFloat(curRef.simCash as any || 0);
     const totalPortfolio = Math.max(1, totalPosValue + cashValue);
 
-    const exposureCap = Math.min(Math.max(60, curRef.maxExposurePercentPerSymbol || 65), 90);
-    const baseExposurePct = isAlpaca ? 35 : 25;
+    const exposureCap = Math.min(Math.max(60, curRef.maxExposurePercentPerSymbol || 75), 100);
+    const baseExposurePct = isAlpaca ? 50 : 35;
     let exposurePct = baseExposurePct;
 
     if (stats) {
@@ -1033,12 +1030,12 @@ export default function MarketTerminal() {
       exposurePct = baseExposurePct * Math.min(2.0, 1 + trendBoost + edgeBoost) * chopPenalty * atrPenalty;
     }
 
-    exposurePct = Math.min(exposureCap, Math.max(baseExposurePct * 0.75, exposurePct));
+    exposurePct = Math.min(exposureCap, Math.max(baseExposurePct, exposurePct));
     const targetValue = totalPortfolio * (exposurePct / 100);
     const qtyFromExposure = targetValue / currentPrice;
 
     const minQty = symbol === "BTCUSD" ? 0.0001 : 1;
-    const baseQty = isAlpaca ? 20 : 15;
+    const baseQty = isAlpaca ? 10 : 8;
     let qty = Math.max(minQty, qtyFromExposure);
     qty = Math.max(qty, baseQty);
 
@@ -1289,27 +1286,8 @@ export default function MarketTerminal() {
     }
     symbolClean = symbolClean.toUpperCase().trim();
 
-    if (side === "BUY") {
-      const cooldownUntil = autopilotBuyCooldownUntilRef.current[symbolClean] || 0;
-      if (cooldownUntil > Date.now()) {
-        const secLeft = Math.ceil((cooldownUntil - Date.now()) / 1000);
-        return {
-          status: "BLOCKED",
-          code: "BLOCKED_BUY_COOLDOWN",
-          symbol: symbolClean,
-          side,
-          requestedQty: qtyNum,
-          executedQty: 0,
-          message: `BUY cooldown active for ${symbolClean} (${secLeft}s remaining).`
-        };
-      }
-    }
-
-    // Market-block / crypto-only enforcement
+    // Market-block enforcement
     try {
-      const curBlocked = curRef.blockedMarkets || { wallStreet: false };
-
-      // Hard guard: when Wall Street session is closed, block non-crypto autopilot orders.
       const marketSessionNow = getMarketSessionET();
       if (marketSessionNow === "CLOSED") {
         addAutopilotLog(`Blocked ${side} ${symbolClean}: market session is CLOSED (ET).`, "warn");
@@ -1322,11 +1300,6 @@ export default function MarketTerminal() {
           executedQty: 0,
           message: "Market is closed. Non-crypto orders are blocked until pre-market."
         };
-      }
-
-      if (side === 'BUY' && curBlocked.wallStreet) {
-        addAutopilotLog(`Blocked BUY ${symbolClean}: Wall Street trading is disabled.`, 'warn');
-        return { status: 'BLOCKED', code: 'BLOCKED_MARKET_CLOSED', symbol: symbolClean, side, requestedQty: qtyNum, executedQty: 0, message: 'Wall Street trading disabled.' };
       }
     } catch (e) { /* ignore */ }
 
@@ -1422,49 +1395,6 @@ export default function MarketTerminal() {
             executedQty: 0,
             message: `Expected edge ${stat.expectedEdgeBps.toFixed(1)}bps not above cost ${stat.estimatedCostBps.toFixed(1)}bps + buffer.`
           };
-        }
-      }
-    }
-
-    // Automated Blacklist Intercept Check (e.g. to avoid trading low-winrate or banned symbols like TSLA in Autopilot entirely)
-    if (curRef.autopilotBlacklist?.includes(symbolClean)) {
-      addAutopilotLog(`🚫 Blacklist Blocked automated ${side} order of ${symbolClean}: symbol is blacklisted in Autopilot Control Hub.`, "warn");
-      addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Autopilot Blacklist intercepted/prevented ${side} order for ${symbolClean}.`, "WARNING");
-      return {
-        status: "BLOCKED",
-        code: "BLOCKED_BLACKLIST",
-        symbol: symbolClean,
-        side,
-        requestedQty: qtyNum,
-        executedQty: 0,
-        message: `Symbol ${symbolClean} is blacklisted.`
-      };
-    }
-
-    // Sentry Loss Guard Check - prevents buying more when a position is under drawdown and losing money
-    if (side === "BUY" && curRef.autopilotLossGuard) {
-      const activePositions = curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions;
-      const matched = activePositions?.find((p: any) => p.symbol === symbolClean);
-      if (matched) {
-        const qty = parseFloat(matched.qty || "0");
-        if (qty > 0) {
-          const pl = matched.unrealized_pl !== undefined 
-            ? parseFloat(matched.unrealized_pl) 
-            : (parseFloat(matched.current_price || 0) - parseFloat(matched.avg_entry_price || 0)) * qty;
-          if (pl < 0) {
-            autopilotLossGuardBlockedUntilRef.current[symbolClean] = Date.now() + 5 * 60 * 1000;
-            addAutopilotLog(`🛡️ Loss Guard Blocked BUY of ${symbolClean}: existing position is holding a paper loss of $${pl.toFixed(2)}. Capital protected from average-down traps!`, "warn");
-            addLog(symbolClean, "AUTO_BUY_BLOCKED", `Sentry Loss Guard withheld automated buy order of ${symbolClean} to avoid averaging down on a losing holding.`, "WARNING");
-            return {
-              status: "BLOCKED",
-              code: "BLOCKED_LOSS_GUARD",
-              symbol: symbolClean,
-              side,
-              requestedQty: qtyNum,
-              executedQty: 0,
-              message: `Loss guard blocked averaging down on ${symbolClean}.`
-            };
-          }
         }
       }
     }
@@ -2535,43 +2465,21 @@ export default function MarketTerminal() {
 
       const currentOpenCounts = computeOpenCounts(currentActivePositions);
       const maxOpenPositions = curRef.maxConcurrentPositions || 999;
-      if (curRef.useAlpacaLive && currentOpenCounts.all >= maxOpenPositions) {
-        setAutopilotScanTotalTargets(0);
-        setAutopilotScanProcessedCount(0);
-        setAutopilotCurrentScanTarget(null);
-        setAutopilotScanError(`Autopilot scan paused: ${currentOpenCounts.all} open positions have reached the configured concurrent limit of ${maxOpenPositions}.`);
-        setAutopilotScanErrorCount((prev) => prev + 1);
-        addAutopilotLog(`Autopilot paused because open position count (${currentOpenCounts.all}) meets or exceeds the concurrent cap (${maxOpenPositions}).`, "warn");
-        return;
-      }
 
       const parsedTargets = (curRef.autopilotTargetTicker || "AAPL")
         .split(/[\s,]+/)
         .map((s: string) => s.trim().toUpperCase())
         .filter(Boolean);
-      const nowTs = Date.now();
-      const isLossGuardTemporarilyBlocked = (sym: string) => (autopilotLossGuardBlockedUntilRef.current[sym] || 0) > nowTs;
-      const blacklistSet = new Set((curRef.autopilotBlacklist || []).map((s: string) => s.toUpperCase()));
       const broadUniverseTargets = autopilotScanBroadUniverse
         ? quickTickers.map((s) => s.toUpperCase())
         : [];
       const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
-      let scanTargets = baseTargets.filter((sym: string) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
+      let scanTargets = [...baseTargets];
 
       // During CLOSED session, only scan crypto symbols so non-crypto order attempts are not spammed.
       const marketSessionNow = getMarketSessionET();
       if (marketSessionNow === "CLOSED") {
         scanTargets = scanTargets.filter((sym: string) => isCryptoSymbol(sym));
-      }
-
-      // If user supplied only one target and it's temporarily blocked by Loss Guard,
-      // rotate through quick tickers instead of hammering the same blocked symbol.
-      if (baseTargets.length <= 1 && scanTargets.length === 0) {
-        const dynamicPool = Array.from(new Set([...baseTargets, ...quickTickers.map((s) => s.toUpperCase())]));
-        scanTargets = dynamicPool.filter((sym) => !blacklistSet.has(sym) && !isLossGuardTemporarilyBlocked(sym));
-        if (scanTargets.length > 0) {
-          addAutopilotLog(`Primary symbol ${baseTargets[0]} is Loss-Guard blocked. Rotating to alternate targets: ${scanTargets.slice(0, 5).join(", ")}${scanTargets.length > 5 ? "..." : ""}`, "info");
-        }
       }
 
       if (scanTargets.length === 0) {
