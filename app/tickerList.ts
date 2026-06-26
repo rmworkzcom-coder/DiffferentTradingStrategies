@@ -18,5 +18,15 @@ export const quickTickers = [
   "WFC", "MS", "BEN", "TROW", "IVZ", "VLO", "PSX", "HES", "MPC", "KMI",
   "ETR", "AEP", "D", "PNW", "AEE", "ES", "XEL", "ED", "PEG", "SRE",
   "ESRT", "EIX", "PPL", "NRG", "RE", "WEC", "DTE", "AWK", "CNP", "PCG",
-  "OGE", "FE", "SLB", "HAL", "BKR", "NOV", "FTI", "OXY", "APA", "PAA"
+  "OGE", "FE", "SLB", "HAL", "BKR", "NOV", "FTI", "OXY", "APA", "PAA",
+  "GOOGL", "BABA", "NIO", "SPOT", "VZ", "TM", "SAP", "TCEHY", "PDD", "AIR",
+  "BIDU", "UBS", "WDAY", "CERN", "DXCM", "NTAP", "ANET", "ADSK", "YUM", "GIS",
+  "KMB", "ITW", "CNC", "O", "AKAM", "CHRW", "EMR", "PNR", "IRM", "AMP",
+  "PH", "APTV", "FOXA", "FOX", "NTRS", "NWL", "KSS", "DISH", "MCK", "ABMD",
+  "XRAY", "EFX", "PAYC", "ZEN", "MSCI", "A", "ETN", "BR", "STZ", "CAH",
+  "CTAS", "LHX", "NDAQ", "AVB", "PSA", "MTD", "ECL", "RMD", "LRCX", "SWKS",
+  "APH", "TEL", "KEYS", "FTNT", "ZYXI", "ZBRA", "CELG", "BIIB", "REGN", "ALXN",
+  "ESRX", "GPN", "VRSK", "HOLX", "ILMN", "VMC", "GWW", "DOV", "COL", "PPG",
+  "AFL", "ALL", "TRV", "AIG", "PGR", "CB", "MMC", "WRB", "AJG", "MKTX",
+  "MTB", "HBAN", "ZION", "SBNY", "FHN", "SPG", "WRE", "ESS", "UDR", "BRX"
 ];

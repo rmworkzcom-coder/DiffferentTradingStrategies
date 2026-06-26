@@ -1,24 +1,5 @@
 "use client";
 
-// Client-side environment safeguard against external/injected scripts lookups on window
-if (typeof window !== "undefined") {
-  try {
-    const namespaces = ["wx", "my", "swan", "tt", "qq", "ks", "qh"];
-    namespaces.forEach((ns) => {
-      const w = window as any;
-      if (!w[ns]) {
-        w[ns] = { miniProgram: {} };
-      } else if (typeof w[ns] === "object" && w[ns] !== null) {
-        if (!w[ns].miniProgram) {
-          w[ns].miniProgram = {};
-        }
-      }
-    });
-  } catch (e) {
-    // fail silent
-  }
-}
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { ResponsiveContainer, AreaChart, Area, YAxis } from "recharts";
 import { quickTickers } from "./tickerList";
@@ -491,10 +472,11 @@ export default function MarketTerminal() {
       return next.slice(-4); // keep latest 4 active toasts only
     });
 
-    // Automatically dismiss toast after 4 seconds
+    // Automatically dismiss toasts after a longer duration for warnings and critical alerts
+    const dismissDelay = type === "CRITICAL" || type === "WARNING" ? 9000 : 4000;
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4000);
+    }, dismissDelay);
   }, []);
 
   // Helper log function (hoisted so effects can depend on it safely)
@@ -912,6 +894,7 @@ export default function MarketTerminal() {
   const [autopilotScanProcessedCount, setAutopilotScanProcessedCount] = useState<number>(0);
   const [autopilotPerformance, setAutopilotPerformance] = useState<Record<string, PerformanceCounts>>({});
   const [symbolPerformance, setSymbolPerformance] = useState<Record<string, PerformanceCounts>>({});
+  const [symbolProfitStats, setSymbolProfitStats] = useState<Record<string, { trades: number; wins: number; losses: number; realizedPnl: number }>>({});
   const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
   // Derived counts
   const prevAutopilotActiveRef = useRef<boolean | null>(null);
@@ -967,6 +950,24 @@ export default function MarketTerminal() {
     return false;
   }, []);
 
+  const recordSymbolProfit = useCallback((symbolClean: string, realizedPnl: number) => {
+    const key = String(symbolClean || "").toUpperCase().trim();
+    if (!key) return;
+    setSymbolProfitStats((prev) => {
+      const existing = prev[key] || { trades: 0, wins: 0, losses: 0, realizedPnl: 0 };
+      const isWin = realizedPnl > 0;
+      return {
+        ...prev,
+        [key]: {
+          trades: existing.trades + 1,
+          wins: existing.wins + (isWin ? 1 : 0),
+          losses: existing.losses + (isWin ? 0 : 1),
+          realizedPnl: parseFloat((existing.realizedPnl + realizedPnl).toFixed(2)),
+        },
+      };
+    });
+  }, []);
+
   const autopilotScanList = useMemo(() => {
     const parsedTargets = (autopilotTargetTicker || "AAPL")
       .split(/[\s,]+/)
@@ -987,7 +988,7 @@ export default function MarketTerminal() {
     }
 
     return scanTargets;
-  }, [autopilotTargetTicker, autopilotScanBroadUniverse, quickTickers]);
+  }, [autopilotTargetTicker, autopilotScanBroadUniverse]);
 
   const computeOpenCounts = useCallback((positions: any[]) => {
     const all = (positions || []).filter((p: any) => parseFloat(p.qty || 0) > 0).length;
@@ -1003,7 +1004,8 @@ export default function MarketTerminal() {
   }, []);
 
   const getEstimatedCostBps = useCallback((sym: string) => {
-    return 8;
+    // Use a conservative cost estimate so the bot only trades when edge is strong.
+    return 12;
   }, []);
 
   // Calculate autopilot trade quantity based on portfolio exposure, symbol price, and trend strength
@@ -1035,9 +1037,15 @@ export default function MarketTerminal() {
     const qtyFromExposure = targetValue / currentPrice;
 
     const minQty = symbol === "BTCUSD" ? 0.0001 : 1;
-    const baseQty = isAlpaca ? 10 : 8;
+    const maxQty = isAlpaca
+      ? symbol === "BTCUSD"
+        ? 0.005
+        : 4
+      : symbol === "BTCUSD"
+        ? 0.001
+        : 2;
     let qty = Math.max(minQty, qtyFromExposure);
-    qty = Math.max(qty, baseQty);
+    qty = Math.min(qty, maxQty);
 
     if (symbol === "BTCUSD") {
       return parseFloat(qty.toFixed(4));
@@ -1094,6 +1102,21 @@ export default function MarketTerminal() {
       estimatedCostBps,
     };
   }, [getEstimatedCostBps]);
+
+  const fetchAutopilotQuote = useCallback(async (symbol: string): Promise<number | null> => {
+    try {
+      const res = await fetch(`/api/alpaca/quote?symbol=${encodeURIComponent(symbol)}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) return null;
+      const payload = await res.json();
+      const price = Number(payload?.price);
+      if (!Number.isFinite(price) || price <= 0) return null;
+      return price;
+    } catch {
+      return null;
+    }
+  }, []);
 
   const mergeBinanceSpotIntoPositions = useCallback(async (basePositions: Position[]): Promise<Position[]> => {
     return basePositions;
@@ -1481,11 +1504,24 @@ export default function MarketTerminal() {
         }
 
         const rawAffordableQty = maxAdditionalValue / Math.max(guessPrice, 0.000001);
-        const resizedQty = symbolClean === "BTCUSD"
-          ? parseFloat(rawAffordableQty.toFixed(4))
-          : parseFloat(rawAffordableQty.toFixed(2));
+        const tickSize = symbolClean === "BTCUSD" ? 10000 : 100;
+        const resizedQty = Math.floor(rawAffordableQty * tickSize) / tickSize;
 
-        if (!Number.isFinite(resizedQty) || resizedQty < minExecutableQty || resizedQty >= qtyNum) {
+        if (!Number.isFinite(resizedQty) || resizedQty < minExecutableQty) {
+          addAutopilotLog(`🚫 Blocked BUY ${symbolClean}: post-order exposure ${newExposurePct.toFixed(2)}% would exceed ${capPct}% limit.`, "warn");
+          addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: exposure cap exceeded (${newExposurePct.toFixed(2)}%).`, "WARNING");
+          return {
+            status: "BLOCKED",
+            code: "BLOCKED_EXPOSURE_CAP",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: 0,
+            message: `Post-order exposure ${newExposurePct.toFixed(2)}% exceeds cap ${capPct}%.`
+          };
+        }
+
+        if (resizedQty >= qtyNum) {
           addAutopilotLog(`🚫 Blocked BUY ${symbolClean}: post-order exposure ${newExposurePct.toFixed(2)}% would exceed ${capPct}% limit.`, "warn");
           addLog(symbolClean, "AUTO_TRADE_BLOCKED", `Blocked automated BUY: exposure cap exceeded (${newExposurePct.toFixed(2)}%).`, "WARNING");
           return {
@@ -1536,7 +1572,7 @@ export default function MarketTerminal() {
 
           const estimatedCost = estPrice * qtyNum;
           const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-          const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+          const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
           const isFractional = qtyNum % 1 !== 0;
           // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
           const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
@@ -1614,7 +1650,7 @@ export default function MarketTerminal() {
               };
             }
 
-            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
             if (!Number.isFinite(rawBuyingPower) || rawBuyingPower <= 0) {
               addAutopilotLog(`Blocked live short of ${symbolClean}: account buying power looks insufficient to support margin shorting.`, "warn");
               addLog(symbolClean, "AUTO_SELL_BLOCKED", `Blocked automated short-sell of ${symbolClean} due to low buying power.`, "WARNING");
@@ -1639,7 +1675,7 @@ export default function MarketTerminal() {
         }
       }
 
-      addAutopilotLog(`[Bot Order] Queueing live brokerage market ${side} of ${finalQty} ${symbolClean}...`, "trade");
+      addAutopilotLog(`[Bot Order] Validated ${side} ${finalQty} ${symbolClean}. Submitting market order...`, "trade");
       addLog("AUTOPILOT", side, `Transmitting Bot Order: ${side} ${finalQty} shares of ${symbolClean}`, "INFO");
       const release = await orderMutexRef.current.acquire();
       try {
@@ -1653,7 +1689,7 @@ export default function MarketTerminal() {
           if (side === "BUY") {
             const maxCryptoBuyUsd = Math.max(
               100,
-              Math.min(parseFloat(curRef.alpacaAccount?.buying_power || "0"), parseFloat(curRef.alpacaAccount?.cash || "0")) * 0.2
+              Math.min(parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0"), parseFloat(curRef.alpacaAccount?.cash || "0")) * 0.2
             );
             const cappedQty = parseFloat((maxCryptoBuyUsd / Math.max(estPrice, 0.0000001)).toFixed(6));
             if (cryptoQtyToSend * estPrice > maxCryptoBuyUsd) {
@@ -1691,7 +1727,7 @@ export default function MarketTerminal() {
 
           if (!maxSafeOrderVal || maxSafeOrderVal <= 0) {
             const cashValue = parseFloat(curRef.alpacaAccount?.cash || "0");
-            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+            const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
             const isFractional = finalQty % 1 !== 0;
             const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
             maxSafeOrderVal = maxAllowedPower * 0.7;
@@ -1859,8 +1895,10 @@ export default function MarketTerminal() {
           const execPx = Number.isFinite(reportedExecPrice) && reportedExecPrice > 0 ? reportedExecPrice : liveEstimatedPrice;
           const avgEntry = parseFloat(existingPositionBeforeOrder.avg_entry_price || 0);
           if (closeQty > 0 && avgEntry > 0 && execPx > 0) {
+            const pnl = (execPx - avgEntry) * closeQty;
             const dayGuard = ensureDailyGuardWindow();
-            dayGuard.realizedPnl += (execPx - avgEntry) * closeQty;
+            dayGuard.realizedPnl += pnl;
+            recordSymbolProfit(symbolClean, pnl);
           }
           const remainingAfter = Math.max(0, parseFloat(existingPositionBeforeOrder.qty || 0) - closeQty);
           if (remainingAfter <= 0.00005) {
@@ -2235,8 +2273,10 @@ export default function MarketTerminal() {
         const realizedCloseQty = Math.min(existingLongQty, executedSellQty);
         const avgEntry = parseFloat(existingPositionBeforeOrder?.avg_entry_price || 0);
         if (realizedCloseQty > 0 && avgEntry > 0) {
+          const pnl = (executedSellPrice - avgEntry) * realizedCloseQty;
           const dayGuard = ensureDailyGuardWindow();
-          dayGuard.realizedPnl += (executedSellPrice - avgEntry) * realizedCloseQty;
+          dayGuard.realizedPnl += pnl;
+          recordSymbolProfit(symbolClean, pnl);
         }
         if (existingLongQty > 0 && existingLongQty - executedSellQty <= 0.00005) {
           delete autopilotPositionOpenedAtRef.current[symbolClean];
@@ -2279,7 +2319,7 @@ export default function MarketTerminal() {
         }
       }
     }
-  }, [addAutopilotLog, addLog, armLiquidationCooldown, isLossMakingPosition, computeOpenCounts, isCryptoSymbol, normalizeSymbol, ensureDailyGuardWindow, AUTOPILOT_MIN_HOLD_MS, fetchBinanceFundingSnapshot]);
+  }, [addAutopilotLog, addLog, armLiquidationCooldown, isLossMakingPosition, computeOpenCounts, ensureDailyGuardWindow, AUTOPILOT_MIN_HOLD_MS, AUTOPILOT_FAILURE_PAUSE_MS, fetchBinanceFundingSnapshot, recordSymbolProfit]);
 
   const ERROR_OUTCOME_STICKY_MS = 45_000; // errors stay in the UI card for 45s
 
@@ -2302,7 +2342,7 @@ export default function MarketTerminal() {
     });
 
     if ((outcome.status === "BLOCKED" || outcome.status === "REJECTED") && outcome.side === "BUY" && outcome.symbol === autopilotCurrentScanTarget) {
-      setAutopilotScanError(`Scan failed for ${outcome.symbol}: ${outcome.message}`);
+      setAutopilotScanError(`Scan failed for ${outcome.symbol} ${outcome.requestedQty}: ${outcome.message}`);
       setAutopilotScanErrorCount((prev) => prev + 1);
     } else if (outcome.symbol === autopilotCurrentScanTarget && (outcome.status === "FILLED" || outcome.status === "PENDING")) {
       setAutopilotScanError(null);
@@ -2474,19 +2514,21 @@ export default function MarketTerminal() {
         ? quickTickers.map((s) => s.toUpperCase())
         : [];
       const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
-      let scanTargets = [...baseTargets];
-
-      // During CLOSED session, only scan crypto symbols so non-crypto order attempts are not spammed.
-      const marketSessionNow = getMarketSessionET();
-      if (marketSessionNow === "CLOSED") {
-        scanTargets = scanTargets.filter((sym: string) => isCryptoSymbol(sym));
+      const equityTargets = baseTargets.filter((sym: string) => !isCryptoSymbol(sym));
+      let scanTargets = equityTargets.length > 0 ? equityTargets : ["AAPL"];
+      if (equityTargets.length !== baseTargets.length) {
+        addAutopilotLog("Wall Street equities only: removed crypto symbols from scan targets.", "info");
       }
 
-      if (scanTargets.length === 0) {
-        scanTargets = baseTargets;
-        if (marketSessionNow === "CLOSED") {
-          scanTargets = scanTargets.filter((sym: string) => isCryptoSymbol(sym));
-        }
+      const marketSessionNow = getMarketSessionET();
+      if (marketSessionNow === "CLOSED") {
+        setAutopilotScanTotalTargets(0);
+        setAutopilotScanProcessedCount(0);
+        setAutopilotCurrentScanTarget(null);
+        setAutopilotScanError("Market is closed. Autopilot scans are paused until market open.");
+        setAutopilotScanErrorCount(0);
+        addAutopilotLog("Autopilot scan skipped: market session is CLOSED. Wall Street equities trade only during market hours.", "info");
+        return;
       }
 
       if (scanTargets.length === 0) {
@@ -2508,18 +2550,38 @@ export default function MarketTerminal() {
       setAutopilotScanError(null);
       setAutopilotScanErrorCount(0);
 
+      const pendingBuyCount = autopilotPendingBuySymbolsRef.current.size;
+      const maxPendingBuyThreshold = 10;
+      if (pendingBuyCount >= maxPendingBuyThreshold) {
+        addAutopilotLog(`Paused autopilot scan: ${pendingBuyCount} pending broker buy confirmations remain. Waiting for fills before new entries.`, "warn");
+        return;
+      }
+
       // Limit how many distinct symbols we attempt per scan to avoid rapid multi-symbol bursts.
       // When broad-universe scanning is disabled we only process a single target each scan
       // so the `autopilotInterval` pause is effective. If broad-universe is enabled, allow
-      // a larger batch so the system cycles through more of the 200-stock universe faster.
-      const maxTargetsPerScan = autopilotScanBroadUniverse ? 50 : 1;
+      // a small batch so the system cycles through more of the universe without flooding the broker.
+      const maxTargetsPerScan = autopilotScanBroadUniverse ? 10 : 1;
       const processedScanTargets = orderedScanTargets.slice(0, Math.max(1, Math.min(orderedScanTargets.length, maxTargetsPerScan)));
 
       for (const targetSymbol of processedScanTargets) {
         setAutopilotCurrentScanTarget(targetSymbol);
         setAutopilotScanProcessedCount((prev) => prev + 1);
+
+        // Yield to the browser so log/state updates can render during long scan batches.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
         const matchedForStats = currentActivePositions.find((p) => p.symbol === targetSymbol);
-        const scanPrice = matchedForStats?.current_price || (targetSymbol === "BTCUSD" ? 67200.0 : targetSymbol === "ETHUSD" ? 3800.0 : 150.0);
+        let scanPrice = matchedForStats?.current_price || 0;
+        if (!Number.isFinite(scanPrice) || scanPrice <= 0) {
+          const quotePrice = await fetchAutopilotQuote(targetSymbol);
+          if (quotePrice) {
+            scanPrice = quotePrice;
+          }
+        }
+        if (!Number.isFinite(scanPrice) || scanPrice <= 0) {
+          scanPrice = targetSymbol === "BTCUSD" ? 67200.0 : targetSymbol === "ETHUSD" ? 3800.0 : 150.0;
+        }
         recordMarketStat(targetSymbol, scanPrice);
 
         if (curRef.autopilotStrategy === "SENTRY_HEAL") {
@@ -2571,9 +2633,9 @@ export default function MarketTerminal() {
 
         const isLiveMode = !!curRef.useAlpacaLive;
         const rawCash = parseFloat(curRef.alpacaAccount?.cash || "0");
-        const rawBuyingPower = parseFloat(curRef.alpacaAccount?.buying_power || "0");
+        const rawBuyingPower = parseFloat(curRef.alpacaAccount?.regt_buying_power || curRef.alpacaAccount?.buying_power || "0");
         const liveBudget = isLiveMode
-          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.20)
+          ? Math.max(0, Math.min(rawBuyingPower > 0 ? rawBuyingPower : rawCash, Math.max(rawCash, 0)) * 0.10)
           : 0;
         const liveMinQty = Math.max(0.01, Number(curRef.liveMinOrderQty) || 0.01);
         const budgetQtyRaw = currentSpotPrice > 0 ? liveBudget / currentSpotPrice : 0;
@@ -2581,17 +2643,26 @@ export default function MarketTerminal() {
           ? parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(4))
           : parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(2));
 
+        const stat = autopilotMarketStatsRef.current[targetSymbol];
+        const hasStrongEdge = !!stat && stat.expectedEdgeBps > stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS;
+        const strongTrend = !!stat && stat.trendStrength >= Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.6);
+
         if (hasPendingSeedBuy) {
           addAutopilotLog(`Scalper bootstrap paused for ${targetSymbol}: previous BUY is still pending broker fill confirmation.`, "info");
           continue;
         }
         if (!existingScalperPos || existingScalperPos.qty <= 0) {
+          const exposureQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
           const seedQty = isLiveMode
-            ? liveQtyByBudget
+            ? Math.min(liveQtyByBudget, exposureQty)
             : (targetSymbol === "BTCUSD" ? 0.002 : 1);
-          addAutopilotLog(`Scalper bootstrap: no active ${targetSymbol} position found. Attempting seed BUY ${seedQty}.`, "trade");
-          const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", seedQty);
-          logScanOrderOutcome("SCALPER", orderOutcome);
+
+          if (hasStrongEdge && strongTrend && seedQty > 0) {
+            const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", seedQty);
+            logScanOrderOutcome("SCALPER", orderOutcome);
+          } else {
+            addAutopilotLog(`Skipped scalper BUY for ${targetSymbol}: edge or trend insufficient.`, "info");
+          }
           continue;
         }
 
@@ -2614,31 +2685,7 @@ export default function MarketTerminal() {
           }
         }
 
-        const randSeed = Math.random();
-        const buyThreshold = isLiveMode ? 0.55 : 0.60;
-        const sellThreshold = isLiveMode ? 0.45 : 0.40;
-
-        if (randSeed > buyThreshold) {
-          const buyQty = isLiveMode
-            ? liveQtyByBudget
-            : getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
-          addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) is dipping below support. Attempting BUY order.`, "trade");
-          const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", buyQty);
-          logScanOrderOutcome("SCALPER", orderOutcome);
-        } else if (randSeed < sellThreshold) {
-          const exists = currentActivePositions.find((p) => p.symbol === targetSymbol);
-          if (exists && exists.qty > 0) {
-            const baseQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
-            const sellQty = Math.min(exists.qty, isLiveMode ? Math.max(liveMinQty, baseQty * 0.2) : baseQty);
-            addAutopilotLog(`Scalper Signals: ${targetSymbol} ($${currentSpotPrice.toFixed(2)}) hit local resistance spike. Attempting SELL order.`, "trade");
-            const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", sellQty);
-            logScanOrderOutcome("SCALPER", orderOutcome);
-          } else {
-            addAutopilotLog(`Scalper Signals: Selling sign emitted but zero inventory of ticker ${targetSymbol} exists.`, "info");
-          }
-        } else {
-          addAutopilotLog(`Scalper Range status: Neutral oscillation. No position change.`, "success");
-        }
+        addAutopilotLog(`Scalper ${targetSymbol}: no random trading action executed. Existing position is held until deterministic exit or stronger trade signal occurs.`, "info");
       }
 
       else if (curRef.autopilotStrategy === "TOUCH_TURN") {
@@ -3405,19 +3452,8 @@ export default function MarketTerminal() {
             qty = 5;
             backupReason = `Deleveraging Alert: margin capacity (${safeCapacity.toFixed(1)}%) is above limits (${safeWarnThreshold}%). Reducing exposure.`;
           } else {
-            const randSeed = Math.random();
-            if (randSeed > 0.65) {
-              action = "BUY";
-              qty = 5;
-              backupReason = `Identified potential technical oversold pattern for ${cleanTarget}.`;
-            } else if (randSeed < 0.20) {
-              action = "SELL";
-              qty = 5;
-              backupReason = `Profit target indicator hit local resistance for ${cleanTarget}.`;
-            } else {
-              action = "HOLD";
-              backupReason = `Stable consolidation trend observed. No trade posture required for ${cleanTarget}.`;
-            }
+            action = "HOLD";
+            backupReason = `Backup fallback engaged for ${cleanTarget}; market conditions not reliable for live entry.`;
           }
 
           data = {
@@ -3453,7 +3489,7 @@ export default function MarketTerminal() {
       autopilotRunningRef.current = false;
       setIsAutopilotRunning(false);
   }
-  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, setElliottState, addAutopilotLog, logScanOrderOutcome, quickTickers, autopilotInterval, autopilotScanBroadUniverse, recordMarketStat, getAutopilotTradeQty, isCryptoSymbol]);
+  }, [executeAutopilotOrder, setTouchTurnState, setMacdState, setSneakyPivotState, setElliottState, addAutopilotLog, logScanOrderOutcome, autopilotInterval, autopilotScanBroadUniverse, recordMarketStat, getAutopilotTradeQty, computeOpenCounts, fetchAutopilotQuote]);
 
   useEffect(() => {
     if (!isAutopilotActive) {
@@ -3859,7 +3895,7 @@ export default function MarketTerminal() {
     checkAndLiquidate();
     timer = setInterval(checkAndLiquidate, 30000);
     return () => { if (timer) clearInterval(timer); };
-  }, [autoLiquidateBeforeClose, liquidationBeforeCloseMin, executeAutopilotOrder, addLog, addAutopilotLog, isCryptoSymbol]);
+  }, [autoLiquidateBeforeClose, liquidationBeforeCloseMin, executeAutopilotOrder, addLog, addAutopilotLog]);
 
   // Handle Order Placement
   const handleSubmitOrder = async (side: "BUY" | "SELL") => {
@@ -3881,7 +3917,7 @@ export default function MarketTerminal() {
 
     if (isCryptoSymbol(symbolClean)) {
       setIsPlacingOrder(false);
-      setOrderError("Crypto trading is disabled in this terminal app.");
+      setOrderError("Only Wall Street equities are supported in this terminal.");
       addLog(symbolClean, `${side}_BLOCKED`, "Crypto trading is disabled in this terminal app.", "WARNING");
       return;
     }
@@ -3900,8 +3936,9 @@ export default function MarketTerminal() {
       else if (symbolClean === "MSFT") estPrice = 425.0;
     }
 
-    const qtyNum = orderUnit === "USD" ? (inputVal / estPrice) : inputVal;
-    const estimatedCost = orderUnit === "USD" ? inputVal : estPrice * qtyNum;
+    let targetQtyNum = orderUnit === "USD" ? (inputVal / estPrice) : inputVal;
+    let targetNotional = inputVal;
+    let estimatedCost = orderUnit === "USD" ? inputVal : estPrice * targetQtyNum;
 
     if (useAlpacaLive) {
       if (!isConnected) {
@@ -3911,226 +3948,153 @@ export default function MarketTerminal() {
         return;
       }
 
-      // Centralized routing: if this is a crypto symbol, route to Gemini proxy for live execution
       const isCrypto = isCryptoSymbol(symbolClean);
       if (isCrypto) {
-        const normSymbol = normalizeSymbol(symbolClean);
-        const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
-        const ownedQty = existingPos ? existingPos.qty : 0;
-        const attemptingOpenShort = side === "SELL" && (ownedQty <= 0 || qtyNum > ownedQty);
-        if (attemptingOpenShort && !allowLiveShorts) {
-          setIsPlacingOrder(false);
-          setOrderError(`Live short-selling for crypto is blocked by local policy. Enable 'Allow Live Shorts' to proceed or use the simulator.`);
-          addLog(symbolClean, "SELL_BLOCKED_SHORTS", "Blocked live crypto short attempt — enable Allow Live Shorts to override.", "WARNING");
-          return;
-        }
-
-        addLog("BINANCE", side, `Transmitting Crypto Order to Binance: ${side} ${qtyNum} ${normSymbol} (live=${isPaper ? 'paper' : 'live'})`, "INFO");
-        try {
-          // buying-power check for manual crypto orders — prefer Binance futures USDT when available, fallback to local Alpaca buying power
-          const estPrice = alpacaPositions?.find((p: any) => p.symbol === symbolClean)?.current_price || (symbolClean === "BTCUSD" ? 67200 : 150);
-          const rawCashValue = parseFloat(alpacaAccount?.cash || "0");
-          const rawBuyingPowerValue = parseFloat(alpacaAccount?.buying_power || "0");
-          const maxCryptoBuyUsd = Math.max(
-            100,
-            Math.min(rawBuyingPowerValue > 0 ? rawBuyingPowerValue : rawCashValue, rawCashValue) * 0.15
-          );
-          let qtyToSend = parseFloat(qtyNum.toFixed(6));
-          if (side === "BUY" && (qtyToSend * estPrice) > maxCryptoBuyUsd) {
-            qtyToSend = parseFloat((maxCryptoBuyUsd / Math.max(estPrice, 0.0000001)).toFixed(6));
-            addLog(normSymbol, "BUY_RESIZED", `Manual crypto BUY capped to ~$${maxCryptoBuyUsd.toFixed(2)} by policy.`, "INFO");
-          }
-          const intendedCost = estPrice * qtyToSend;
-          let maxSafeOrderVal = 0;
-          let preferredUsdt = 0;
-          let preferredSource: "futures" | "spot" | "none" = "none";
-          if (maxSafeOrderVal <= 0) {
-            const cashValue = parseFloat(alpacaAccount?.cash || "0");
-            const rawBuyingPower = parseFloat(alpacaAccount?.buying_power || "0");
-            const isFractional = qtyNum % 1 !== 0;
-            const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
-            maxSafeOrderVal = maxAllowedPower * 0.7;
-          }
-
-          if (intendedCost > maxSafeOrderVal) {
-            setIsPlacingOrder(false);
-            setOrderError(`Blocked: insufficient buying power for ${symbolClean} order (~${intendedCost.toFixed(2)} required).`);
-            addLog(symbolClean, "BUY_FAILED", `Blocked manual buy due to insufficient buying power.`, "WARNING");
-            return;
-          }
-
-          const payload: any = {
-            symbol: symbolClean,
-            side: side,
-            type: "MARKET",
-            quantity: qtyToSend,
-            isLive: true,
-            openShort: attemptingOpenShort && allowLiveShorts,
-          };
-
-          const response = await fetch("/api/binance/trade", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-
-          const resText = await response.text();
-          let dataOrder: any = null;
-          try {
-            dataOrder = JSON.parse(resText);
-          } catch (e) {
-            throw new Error(`Server returned error output: ${resText.slice(0, 120).trim()}...`);
-          }
-
-          if (!response.ok || dataOrder?.error) {
-            throw new Error(dataOrder?.error || "Order rejected by broker proxy server.");
-          }
-
-          setOrderSuccess(`Live order accepted: ${dataOrder.order?.clientOrderId || dataOrder.order?.orderId || 'submitted'}`);
-          addLog(symbolClean, `${side}_FILLED`, `Live order executed for ${qtyNum} ${symbolClean}.`, "SUCCESS");
-
-          const newOrderObj: Order = {
-            id: dataOrder.order?.clientOrderId || dataOrder.order?.orderId || `live-${Date.now()}`,
-            symbol: symbolClean,
-            side: side,
-            qty: qtyNum,
-            price: dataOrder.order?.price || dataOrder.order?.avgPrice || estPrice,
-            status: dataOrder.order?.status?.toUpperCase() || "ACCEPTED",
-            submittedAt: new Date().toLocaleTimeString(),
-          };
-          setOrders((prev) => [newOrderObj, ...prev]);
-          setTimeout(() => handleRefreshData(), 1200);
-        } catch (err: any) {
-          console.error(err);
-          setOrderError(err.message || "Failed Binance order.");
-          addLog(symbolClean, `${side}_REJECTED`, err.message || "Binance execution failed.", "CRITICAL");
-        } finally {
-          setIsPlacingOrder(false);
-        }
-
+        setIsPlacingOrder(false);
+        setOrderError("Only Wall Street equities are supported in this terminal.");
+        addLog(symbolClean, "AUTO_BUY_BLOCKED", "Crypto trading is disabled in this terminal app.", "WARNING");
         return;
       }
 
-       else {
-        if (side === "SELL") {
-          const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
-          const ownedQty = existingPos ? existingPos.qty : 0;
-          if (ownedQty <= 0) {
-            setIsPlacingOrder(false);
-            setOrderError(`Alpaca Client: You do not own a long position in ${symbolClean} to sell. Short-selling is blocked on Alpaca Live mode to prevent account rejections. Switch to Local Risk Simulator to construct active short positions!`);
-            addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on Alpaca Live mode.`, "WARNING");
-            return;
-          }
-          if (qtyNum > ownedQty) {
-            setIsPlacingOrder(false);
-            setOrderError(`Alpaca Client: You only own ${ownedQty} shares of ${symbolClean}. You cannot sell ${qtyNum.toFixed(6)} shares as that would require short-selling, which is restricted in this account mode.`);
-            addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on Alpaca Live mode. Tried to sell ${qtyNum} vs owned ${ownedQty}.`, "WARNING");
-            return;
-          }
-        } else if (side === "BUY") {
-          const cashValue = parseFloat(alpacaAccount?.cash || "0");
-          const rawBuyingPower = parseFloat(alpacaAccount?.buying_power || "0");
-          const isFractional = qtyNum % 1 !== 0;
-          // Fractional shares cannot be bought with margin, and accounts under $2000 are cash-only by regulation.
-          const buyingPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
-          if (estimatedCost > buyingPower) {
-            setIsPlacingOrder(false);
-            setOrderError(`Alpaca Client: Insufficient buying power. Estimated cost for order is ${estimatedCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} but you only have ${buyingPower.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} available.`);
-            addLog(symbolClean, "BUY_FAILED", `Blocked manual buy on Alpaca Live mode due to insufficient buying power.`, "WARNING");
-            return;
-          }
-        }
-
-        addLog("ALPACA", side, `Transmitting Order: ${side} for ${orderUnit === "USD" ? `${inputVal}` : `${qtyNum} shares`} of ${symbolClean}`, "INFO");
-        try {
-          const payload: any = {
-            apiKey,
-            apiSecret,
-            isPaper,
-            symbol: symbolClean,
-            side: side.toLowerCase(),
-          };
-
-          if (orderUnit === "USD" && side === "BUY") {
-            payload.notional = inputVal;
-          } else {
-            payload.qty = parseFloat(qtyNum.toFixed(6));
-          }
-          payload.estimatedPrice = estPrice;
-
-          const response = await fetch("/api/alpaca/trade", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-
-          const resText = await response.text();
-          let dataOrder: any = null;
-          try {
-            dataOrder = JSON.parse(resText);
-          } catch (e) {
-            throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
-          }
-
-          if (!response.ok || dataOrder?.error) {
-            throw new Error(dataOrder?.error || "Order rejected by brokerage server.");
-          }
-          setOrderSuccess(`Successfully queued! Order ID: ${dataOrder.id || "Submitted"}.`);
-          addLog(
-            symbolClean,
-            `${side}_FILLED`,
-            `Live market order executed for ${orderUnit === "USD" ? `${inputVal}` : `${qtyNum} share(s)`} of ${symbolClean}.`,
-            "SUCCESS"
-          );
-
-          // Add to historical orders list
-          const newOrderObj: Order = {
-            id: dataOrder.id || `ord-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-            symbol: symbolClean,
-            side: side,
-            qty: qtyNum,
-            price: dataOrder.filled_avg_price ? parseFloat(dataOrder.filled_avg_price) : (dataOrder.price || 0),
-            status: dataOrder.status?.toUpperCase() || "ACCEPTED",
-            submittedAt: new Date().toLocaleTimeString(),
-          };
-          setOrders((prev) => [newOrderObj, ...prev]);
-
-          // Refresh live stats after brief timeout for Alpaca side execution
-          setTimeout(() => {
-            handleRefreshData();
-          }, 1200);
-
-        } catch (err: any) {
-          console.error(err);
-          let errorMsg = err.message || "Failed order validation.";
-          if (errorMsg.includes("is not allowed to short") || errorMsg.includes("shorting")) {
-            errorMsg = "Your connected Alpaca account does not allow short-selling (likely because it is a cash account or has margin disabled). Use the Local Risk Simulator mode to test short layouts!";
-          } else if (errorMsg.includes("insufficient buying power")) {
-            errorMsg = "Your Alpaca account does not have sufficient buying power to execute this size. Try a smaller position or use the Local Risk Simulator mode!";
-          }
-          setOrderError(errorMsg);
-          addLog(symbolClean, `${side}_REJECTED`, errorMsg, "CRITICAL");
-        } finally {
+      if (side === "SELL") {
+        const existingPos = alpacaPositions.find((p) => p.symbol === symbolClean);
+        const ownedQty = existingPos ? existingPos.qty : 0;
+        if (ownedQty <= 0) {
           setIsPlacingOrder(false);
+          setOrderError(`Alpaca Client: You do not own a long position in ${symbolClean} to sell. Short-selling is blocked on Alpaca Live mode to prevent account rejections. Switch to Local Risk Simulator to construct active short positions!`);
+          addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on Alpaca Live mode.`, "WARNING");
+          return;
+        }
+        if (targetQtyNum > ownedQty) {
+          setIsPlacingOrder(false);
+          setOrderError(`Alpaca Client: You only own ${ownedQty} shares of ${symbolClean}. You cannot sell ${targetQtyNum.toFixed(6)} shares as that would require short-selling, which is restricted in this account mode.`);
+          addLog(symbolClean, "SELL_FAILED", `Blocked manual short-sale on Alpaca Live mode. Tried to sell ${targetQtyNum} vs owned ${ownedQty}.`, "WARNING");
+          return;
+        }
+      } else if (side === "BUY") {
+        const cashValue = parseFloat(alpacaAccount?.cash || "0");
+        const rawBuyingPower = parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || "0");
+        const isFractional = targetQtyNum % 1 !== 0;
+        const maxAllowedPower = (cashValue < 2000 || isFractional) ? cashValue : Math.min(rawBuyingPower, cashValue * 4);
+        const maxSafeOrderCost = maxAllowedPower * 0.96;
+        const maxAffordableQty = estPrice > 0 ? maxSafeOrderCost / estPrice : 0;
+        const minQty = symbolClean === "BTCUSD" ? 0.0001 : 0.01;
+
+        if (estimatedCost > maxSafeOrderCost) {
+          if (orderUnit === "USD") {
+            const adjustedNotional = parseFloat(maxSafeOrderCost.toFixed(2));
+            if (adjustedNotional < 1) {
+              setIsPlacingOrder(false);
+              setOrderError(`Alpaca Client: Insufficient buying power for any USD order. Reg-T limit is ${maxSafeOrderCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`);
+              addLog(symbolClean, "BUY_FAILED", `Blocked manual buy on Alpaca Live mode due to insufficient Reg-T buying power.`, "WARNING");
+              return;
+            }
+            targetNotional = adjustedNotional;
+            targetQtyNum = adjustedNotional / estPrice;
+            setOrderQty(adjustedNotional.toFixed(2));
+            addLog(symbolClean, "BUY_RESIZED", `Manual USD buy resized from $${inputVal.toFixed(2)} to $${adjustedNotional.toFixed(2)} to fit Reg-T buying power.`, "INFO");
+          } else {
+            const adjustedQty = symbolClean === "BTCUSD"
+              ? parseFloat(Math.max(0, maxAffordableQty).toFixed(4))
+              : parseFloat(Math.max(0, maxAffordableQty).toFixed(2));
+            if (adjustedQty < minQty) {
+              setIsPlacingOrder(false);
+              setOrderError(`Alpaca Client: Insufficient buying power for any share order. Reg-T limit is ${maxSafeOrderCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`);
+              addLog(symbolClean, "BUY_FAILED", `Blocked manual buy on Alpaca Live mode due to insufficient Reg-T buying power.`, "WARNING");
+              return;
+            }
+            targetQtyNum = adjustedQty;
+            setOrderQty(adjustedQty.toString());
+            addLog(symbolClean, "BUY_RESIZED", `Manual share buy resized to ${adjustedQty} shares to fit Reg-T buying power.`, "INFO");
+          }
         }
       }
-    } else {
-      // Offline simulation execute immediately
-      // Estimate simple price fallback
-      let estPrice = 150.0;
-      const matchedTicker = mockPositions.find((p) => p.symbol === symbolClean);
-      if (matchedTicker) {
-        estPrice = matchedTicker.current_price;
-      } else {
-        // Mock fallback prices for common tickers
-        if (symbolClean === "AAPL") estPrice = 182.2;
-        else if (symbolClean === "TSLA") estPrice = 195.0;
-        else if (symbolClean === "NVDA") estPrice = 115.5;
-        else if (symbolClean === "BTCUSD") estPrice = 67200.0;
-        else if (symbolClean === "MSFT") estPrice = 425.0;
+
+      addLog("ALPACA", side, `Transmitting Order: ${side} for ${orderUnit === "USD" ? `${inputVal}` : `${targetQtyNum} shares`} of ${symbolClean}`, "INFO");
+      try {
+        const payload: any = {
+          apiKey,
+          apiSecret,
+          isPaper,
+          symbol: symbolClean,
+          side: side.toLowerCase(),
+        };
+
+        if (orderUnit === "USD" && side === "BUY") {
+          payload.notional = targetNotional;
+          estimatedCost = targetNotional;
+        } else {
+          payload.qty = parseFloat(targetQtyNum.toFixed(6));
+          estimatedCost = estPrice * targetQtyNum;
+        }
+        payload.estimatedPrice = estPrice;
+
+        const response = await fetch("/api/alpaca/trade", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        const resText = await response.text();
+        let dataOrder: any = null;
+        try {
+          dataOrder = JSON.parse(resText);
+        } catch (e) {
+          throw new Error(`Server returned HTML error: ${resText.slice(0, 120).trim()}...`);
+        }
+
+        if (!response.ok || dataOrder?.error) {
+          throw new Error(dataOrder?.error || "Order rejected by brokerage server.");
+        }
+
+        const brokerStatus = String(dataOrder.status || "ACCEPTED").toUpperCase();
+        const filledQty = Number.parseFloat(String(dataOrder.filled_qty ?? "0"));
+        const isFilledStatus = brokerStatus === "FILLED" || brokerStatus === "PARTIALLY_FILLED";
+        const successMessage = isFilledStatus
+          ? `Live market order filled for ${orderUnit === "USD" ? `${inputVal}` : `${filledQty > 0 ? filledQty : targetQtyNum} share(s)`} of ${symbolClean}.`
+          : `Order accepted by Alpaca and queued for fill. Status: ${brokerStatus}.`;
+
+        setOrderSuccess(`Successfully queued! Order ID: ${dataOrder.id || "Submitted"}. ${successMessage}`);
+        addLog(
+          symbolClean,
+          isFilledStatus ? `${side}_FILLED` : `${side}_ACCEPTED`,
+          successMessage,
+          isFilledStatus ? "SUCCESS" : "INFO"
+        );
+
+        const newOrderObj: Order = {
+          id: dataOrder.id || `ord-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+          symbol: symbolClean,
+          side: side,
+          qty: targetQtyNum,
+          price: dataOrder.filled_avg_price ? parseFloat(dataOrder.filled_avg_price) : (dataOrder.price || 0),
+          status: brokerStatus,
+          submittedAt: new Date().toLocaleTimeString(),
+        };
+        setOrders((prev) => [newOrderObj, ...prev]);
+
+        setTimeout(() => {
+          handleRefreshData();
+        }, 1200);
+      } catch (err: any) {
+        console.error(err);
+        let errorMsg = err.message || "Failed order validation.";
+        if (errorMsg.includes("is not allowed to short") || errorMsg.includes("shorting")) {
+          errorMsg = "Your connected Alpaca account does not allow short-selling (likely because it is a cash account or has margin disabled). Use the Local Risk Simulator mode to test short layouts!";
+        } else if (errorMsg.includes("insufficient buying power")) {
+          errorMsg = "Your Alpaca account does not have sufficient buying power to execute this size. Try a smaller position or use the Local Risk Simulator mode!";
+        }
+        setOrderError(errorMsg);
+        addLog(symbolClean, `${side}_REJECTED`, errorMsg, "CRITICAL");
+      } finally {
+        setIsPlacingOrder(false);
       }
 
-      const orderCost = estPrice * qtyNum;
+      return;
+    }
+
+    // Offline simulation execute immediately
+    const orderCost = estPrice * targetQtyNum;
       const isINR = false;
       const currencySymbol = isINR ? "₹" : "$";
 
@@ -4166,7 +4130,7 @@ export default function MarketTerminal() {
         setMockPositions((prev) => {
           const exists = prev.find((p) => p.symbol === symbolClean);
           if (exists) {
-            const updatedQty = exists.qty + qtyNum;
+            const updatedQty = exists.qty + targetQtyNum;
             if (Math.abs(updatedQty) < 0.0001) {
               return prev.filter((p) => p.symbol !== symbolClean);
             }
@@ -4197,24 +4161,24 @@ export default function MarketTerminal() {
                 : p
             );
           } else {
-            const realAvgEntry = parseFloat(((orderCost + orderFees) / qtyNum).toFixed(4));
+            const realAvgEntry = parseFloat(((orderCost + orderFees) / targetQtyNum).toFixed(4));
             return [
               ...prev,
               {
                 symbol: symbolClean,
-                qty: qtyNum,
+                qty: targetQtyNum,
                 avg_entry_price: realAvgEntry,
                 current_price: estPrice,
                 market_value: parseFloat(orderCost.toFixed(2)),
-                unrealized_pl: parseFloat((orderCost - realAvgEntry * qtyNum).toFixed(2)),
+                unrealized_pl: parseFloat((orderCost - realAvgEntry * targetQtyNum).toFixed(2)),
                 unrealized_plpc: 0,
                 maintenance_margin_rate: parseFloat(newMaint) / 100 || 0.30,
               },
             ];
           }
         });
-        setOrderSuccess(`Simulated purchase complete: Acquired ${qtyNum} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (Fees: ${currencySymbol}${orderFees.toFixed(2)} deducted).`);
-        addLog(symbolClean, "BUY_SIM", `Purchased simulated ${qtyNum} shares at ${currencySymbol}${estPrice} with ${currencySymbol}${orderFees.toFixed(2)} trade drag.`, "SUCCESS");
+        setOrderSuccess(`Simulated purchase complete: Acquired ${targetQtyNum} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (Fees: ${currencySymbol}${orderFees.toFixed(2)} deducted).`);
+        addLog(symbolClean, "BUY_SIM", `Purchased simulated ${targetQtyNum} shares at ${currencySymbol}${estPrice} with ${currencySymbol}${orderFees.toFixed(2)} trade drag.`, "SUCCESS");
       } else {
         // Simulated SELL / SHORT SELL
         const netProceeds = orderCost - orderFees;
@@ -4222,7 +4186,7 @@ export default function MarketTerminal() {
         setMockPositions((prev) => {
           const exists = prev.find((p) => p.symbol === symbolClean);
           if (exists) {
-            const updatedQty = exists.qty - qtyNum;
+            const updatedQty = exists.qty - targetQtyNum;
             if (Math.abs(updatedQty) < 0.0001) {
               return prev.filter((p) => p.symbol !== symbolClean);
             }
@@ -4253,8 +4217,8 @@ export default function MarketTerminal() {
                 : p
             );
           } else {
-            const updatedQty = -qtyNum;
-            const realAvgEntry = parseFloat(((orderCost - orderFees) / qtyNum).toFixed(4));
+            const updatedQty = -targetQtyNum;
+            const realAvgEntry = parseFloat(((orderCost - orderFees) / targetQtyNum).toFixed(4));
             return [
               ...prev,
               {
@@ -4270,8 +4234,8 @@ export default function MarketTerminal() {
             ];
           }
         });
-        setOrderSuccess(`Simulated sale complete: Sold/Short-sold ${qtyNum} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (${currencySymbol}${orderFees.toFixed(2)} charges deducted).`);
-        addLog(symbolClean, "SELL_SIM", `Sold/Short-sold simulated ${qtyNum} shares at ${currencySymbol}${estPrice} with ${currencySymbol}${orderFees.toFixed(2)} trade drag.`, "SUCCESS");
+        setOrderSuccess(`Simulated sale complete: Sold/Short-sold ${targetQtyNum} shares of ${symbolClean} at ${currencySymbol}${estPrice.toFixed(2)} (${currencySymbol}${orderFees.toFixed(2)} charges deducted).`);
+        addLog(symbolClean, "SELL_SIM", `Sold/Short-sold simulated ${targetQtyNum} shares at ${currencySymbol}${estPrice} with ${currencySymbol}${orderFees.toFixed(2)} trade drag.`, "SUCCESS");
       }
 
       // Record offline order
@@ -4280,14 +4244,13 @@ export default function MarketTerminal() {
           id: `sim-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
           symbol: symbolClean,
           side: side,
-          qty: qtyNum,
+          qty: targetQtyNum,
           price: estPrice,
           status: "FILLED_MOCK",
           submittedAt: new Date().toLocaleTimeString(),
         },
         ...prev,
       ]);
-    }
   };
 
   // Add Custom Simulated Position Form
@@ -5278,13 +5241,18 @@ if __name__ == "__main__":
           <div className="p-4 bg-brand-card rounded-xl border border-brand-border relative overflow-hidden col-span-2 lg:col-span-1" id="stat-buying-power">
             <Zap className="absolute -right-2 -bottom-2 h-14 w-14 text-white/5 pointer-events-none" />
             <span className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 font-mono">
-              Account Buying Power
+              Alpaca Reg-T Buying Power
             </span>
             <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono break-all" id="buying-power-number">
-              ${(useAlpacaLive ? parseFloat(alpacaAccount?.buying_power || 0) : activeCash * simLeverageLimit).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              ${(useAlpacaLive ? parseFloat(alpacaAccount?.regt_buying_power || alpacaAccount?.buying_power || 0) : activeCash * simLeverageLimit).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <div className="text-xs text-gray-400 mt-1.5 font-mono" id="stat-buying-power-description">
+              {useAlpacaLive
+                ? `General buying power: $${parseFloat(alpacaAccount?.buying_power || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                : `${simLeverageLimit}x mechanical ratio limit`}
             </div>
             <div className="text-xs text-purple-400 mt-1.5 flex items-center gap-1 font-mono" id="stat-buying-power-limit">
-              <span>{useAlpacaLive ? "Active Alpaca quote" : `${simLeverageLimit}x mechanical ratio limit`}</span>
+              <span>{useAlpacaLive ? "Live Alpaca Reg-T order limit" : "Simulator leverage limit"}</span>
             </div>
           </div>
 
@@ -7014,6 +6982,9 @@ if __name__ == "__main__":
                           .sort((a, b) => (b.wins / Math.max(1, a.wins + a.losses)) - (a.wins / Math.max(1, a.wins + a.losses)));
                         const best = ranked[0];
                         const worst = ranked[ranked.length - 1];
+                        const profitEntries = Object.entries(symbolProfitStats).map(([symbol, stats]) => ({ symbol, ...stats }));
+                        const topPnl = profitEntries.sort((a, b) => b.realizedPnl - a.realizedPnl)[0];
+                        const bottomPnl = profitEntries.sort((a, b) => a.realizedPnl - b.realizedPnl)[0];
                         return (
                           <div className="space-y-2">
                             <div>
@@ -7021,8 +6992,16 @@ if __name__ == "__main__":
                               <div className="text-white font-semibold">{best ? `${best.symbol} ${Math.round((best.wins / Math.max(1, best.wins + best.losses)) * 100)}% win` : "n/a"}</div>
                             </div>
                             <div>
-                              <div className="text-[10px] text-gray-400">Weakest symbol</div>
+                              <div className="text-[10px] text-gray-400">Worst symbol</div>
                               <div className="text-white font-semibold">{worst ? `${worst.symbol} ${Math.round((worst.wins / Math.max(1, worst.wins + worst.losses)) * 100)}% win` : "n/a"}</div>
+                            </div>
+                            <div className="border-t border-brand-border/30 pt-2">
+                              <div className="text-[10px] text-gray-400">Best realized P/L</div>
+                              <div className="text-white font-semibold">{topPnl ? `${topPnl.symbol} ${topPnl.realizedPnl >= 0 ? "+" : ""}${topPnl.realizedPnl.toFixed(2)}` : "n/a"}</div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-gray-400">Worst realized P/L</div>
+                              <div className="text-white font-semibold">{bottomPnl ? `${bottomPnl.symbol} ${bottomPnl.realizedPnl >= 0 ? "+" : ""}${bottomPnl.realizedPnl.toFixed(2)}` : "n/a"}</div>
                             </div>
                           </div>
                         );
@@ -7152,7 +7131,7 @@ if __name__ == "__main__":
           return (
             <div
               key={toast.id}
-              className={`pointer-events-auto p-4 rounded-xl border-2 shadow-xl shadow-black/45 flex items-start gap-3 transition-all duration-300 transform translate-y-0 scale-100 animate-slide-in ${bgColor}`}
+              className={`pointer-events-auto p-4 rounded-xl border-2 shadow-xl shadow-black/45 flex items-start gap-3 transition-all duration-300 transform translate-y-0 scale-100 ${bgColor}`}
               id={`toast-card-${toast.id}`}
             >
               <div className={`${iconColor} shrink-0 mt-0.5`}>
@@ -7175,24 +7154,6 @@ if __name__ == "__main__":
           );
         })}
       </div>
-
-      {/* Global CSS for Button Visual Press-Scale & Toast Entry Slide Animations */}
-      <style dangerouslySetInnerHTML={{ __html: `
-        @keyframes toast-slide-in {
-          from { transform: translateY(1.5rem) scale(0.95); opacity: 0; }
-          to { transform: translateY(0) scale(1); opacity: 1; }
-        }
-        .animate-slide-in {
-          animation: toast-slide-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-        }
-        button, select, input[type="submit"], [role="button"] {
-          transition: transform 0.1s cubic-bezier(0.4, 0, 0.2, 1), filter 0.1s ease-in-out, background-color 0.15s ease !important;
-        }
-        button:not(:disabled):active, select:active, input[type="submit"]:active, [role="button"]:active {
-          transform: scale(0.95) !important;
-          filter: brightness(1.15) !important;
-        }
-      `}} />
 
     </div>
   );
