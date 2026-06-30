@@ -605,7 +605,7 @@ export default function MarketTerminal() {
   const [autopilotFailurePauseSeconds, setAutopilotFailurePauseSeconds] = useState(120);
   // Global scanning master switch — user confirmed live trading; enable scanning by default
   const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
-  const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL");
+  const [autopilotTargetTicker, setAutopilotTargetTicker] = useState("AAPL,MSFT,NVDA,META,AMZN,GOOG");
   const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(false);
   const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean }>({ wallStreet: false });
   const [autopilotAutoSwitchEnabled, setAutopilotAutoSwitchEnabled] = useState<boolean>(true);
@@ -2539,7 +2539,10 @@ export default function MarketTerminal() {
         .split(/[\s,]+/)
         .map((s: string) => s.trim().toUpperCase())
         .filter(Boolean);
-      const broadUniverseTargets = (!curRef.useAlpacaLive && autopilotScanBroadUniverse)
+      // Allow broad-universe targets when the user has enabled the option.
+      // Previously this was disabled in live mode for safety; allow it here
+      // but keep a conservative processing cap for live broker calls.
+      const broadUniverseTargets = (autopilotScanBroadUniverse)
         ? quickTickers.map((s) => s.toUpperCase())
         : [];
       const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : ["AAPL"]), ...broadUniverseTargets]));
@@ -2590,7 +2593,16 @@ export default function MarketTerminal() {
       // When broad-universe scanning is disabled we only process a single target each scan
       // so the `autopilotInterval` pause is effective. If broad-universe is enabled, allow
       // a small batch so the system cycles through more of the universe without flooding the broker.
-      const maxTargetsPerScan = curRef.useAlpacaLive ? 1 : (autopilotScanBroadUniverse ? 10 : 1);
+      // In live mode we previously limited to a single symbol per scan.
+      // Temporarily increase to a small batch when broad-universe is enabled
+      // to let the system rotate through more tickers without being too aggressive.
+      const maxTargetsPerScan = curRef.useAlpacaLive
+        ? (autopilotScanBroadUniverse ? 5 : 1)
+        : (autopilotScanBroadUniverse ? 10 : 1);
+
+      if (curRef.useAlpacaLive && autopilotScanBroadUniverse) {
+        addAutopilotLog(`Broad Universe Scan enabled in LIVE mode — processing up to ${maxTargetsPerScan} targets per scan. Monitor broker rate limits.`, "warn");
+      }
       const processedScanTargets = orderedScanTargets.slice(0, Math.max(1, Math.min(orderedScanTargets.length, maxTargetsPerScan)));
 
       for (const targetSymbol of processedScanTargets) {
