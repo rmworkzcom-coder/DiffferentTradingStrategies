@@ -3526,6 +3526,16 @@ export default function MarketTerminal() {
     return () => clearInterval(timer);
   }, [isAutopilotActive, autopilotInterval, autopilotLastScanAtMs]);
 
+  // If the visible countdown reaches zero and autopilot isn't already running,
+  // trigger a scan immediately so users see "Scanning..." exactly when timer expires.
+  useEffect(() => {
+    if (autopilotNextScanInSec === null) return;
+    if (autopilotNextScanInSec <= 0 && !autopilotRunningRef.current && isAutopilotActive && scanningEnabled) {
+      // start immediate scan
+      executeAutopilotScan();
+    }
+  }, [autopilotNextScanInSec, isAutopilotActive, scanningEnabled, executeAutopilotScan]);
+
   useEffect(() => {
     if (!useAlpacaLive) return;
     if (lastAutopilotOrderOutcome?.status !== "PENDING") return;
@@ -4771,7 +4781,15 @@ if __name__ == "__main__":
   // Number of stocks that will be scanned this pass vs total available universe
   const stocksToScanCount = Math.max(0, autopilotScanTotalTargets || 0);
   const totalUniverseCount = quickTickers.length || 0;
-  const scanPercent = totalUniverseCount > 0 ? Math.min(100, Math.round((stocksToScanCount / totalUniverseCount) * 100)) : 0;
+
+  // When a scan is running, show real-time processed / total targets; otherwise show planned stocksToScan / total universe
+  const displayScanned = isAutopilotRunning ? (autopilotScanProcessedCount || 0) : stocksToScanCount;
+  const displayTotal = isAutopilotRunning ? (autopilotScanTotalTargets || totalUniverseCount) : totalUniverseCount;
+  const displayPercent = displayTotal > 0 ? Math.min(100, Math.round((displayScanned / displayTotal) * 100)) : 0;
+  // Backwards-compatible aliases: some hot-reload bundles reference older names
+  const scanTotal = Math.max(1, displayTotal || 0);
+  const scanProcessed = Math.max(0, displayScanned || 0);
+  const scanPercent = scanTotal > 0 ? Math.min(100, Math.round((scanProcessed / scanTotal) * 100)) : 0;
   // Show 1 active position as requested
   const activePositionsCount = 1;
   const signalsFoundCount = Object.values(autopilotPerformance || {}).reduce((s: number, c: any) => s + (c.wins || 0) + (c.losses || 0), 0) || 0;
@@ -5046,16 +5064,22 @@ if __name__ == "__main__":
                   <div className="rounded-xl bg-[#071227] p-3 text-white flex items-center justify-between gap-4">
                     <div className="flex items-center gap-4">
                       <div className="text-xs text-gray-400">SCAN PROGRESS</div>
-                      <div className="text-2xl font-bold">{stocksToScanCount} / {totalUniverseCount}</div>
-                      <div className="w-48 h-2 bg-black/20 rounded overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-teal-400 via-indigo-500 to-violet-600" style={{ width: `${scanPercent}%` }} />
+                      <div className="text-2xl font-bold">{displayScanned} / {displayTotal}</div>
+                      <div className="relative w-52 h-5 bg-black/20 rounded overflow-hidden">
+                        <div
+                          className="absolute left-0 top-0 h-full bg-gradient-to-r from-teal-400 via-indigo-500 to-violet-600 transition-all duration-500 ease-out"
+                          style={{ width: `${displayPercent}%` }}
+                        />
+                        <div className="absolute inset-0 flex items-center justify-center text-sm font-mono text-white pointer-events-none select-none">
+                          {displayPercent}%
+                        </div>
                       </div>
                     </div>
                     <div className="flex items-center gap-6 text-sm text-gray-200">
                       <div className="text-center"><div className="text-xs text-gray-400">ACTIVE POSITIONS</div><div className="font-bold text-lg">{activePositionsCount}</div></div>
                       <div className="text-center"><div className="text-xs text-gray-400">SIGNALS FOUND</div><div className="font-bold text-lg">{signalsFoundCount}</div></div>
                       <div className="text-center"><div className="text-xs text-gray-400">TRADES OPENED</div><div className="font-bold text-lg">{tradesOpenedCount}</div></div>
-                      <div className="text-center"><div className="text-xs text-gray-400">NEXT SCAN IN</div><div className="font-bold text-lg">{nextScanIn} sec</div></div>
+                      <div className="text-center"><div className="text-xs text-gray-400">NEXT SCAN IN</div><div className="font-bold text-lg">{isAutopilotRunning ? 'Scanning...' : `${nextScanIn} sec`}</div></div>
                       <div className="pl-4 border-l border-white/10 text-sm">
                         <div className="text-xs text-gray-400">CONNECTION</div>
                         <div className="text-green-400 font-semibold">{connectionStatus}</div>
