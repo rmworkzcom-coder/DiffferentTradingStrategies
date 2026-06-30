@@ -2697,17 +2697,29 @@ export default function MarketTerminal() {
           addAutopilotLog(`Scalper bootstrap paused for ${targetSymbol}: previous BUY is still pending broker fill confirmation.`, "info");
           continue;
         }
-        if (!existingScalperPos || existingScalperPos.qty <= 0) {
+          if (!existingScalperPos || existingScalperPos.qty <= 0) {
           const exposureQty = getAutopilotTradeQty(targetSymbol, !curRef.useAlpacaLive);
-          const seedQty = isLiveMode
+          const seedQtyLong = isLiveMode
             ? Math.min(liveQtyByBudget, exposureQty)
             : (targetSymbol === "BTCUSD" ? 0.002 : 1);
 
-          if (hasStrongEdge && strongTrend && seedQty > 0) {
-            const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", seedQty);
+          // Conservative short sizing: halve the long budget size when live to limit risk
+          const seedQtyShort = isLiveMode
+            ? parseFloat(Math.max(liveMinQty, Math.min(liveQtyByBudget * 0.5, exposureQty)).toFixed(targetSymbol === "BTCUSD" ? 4 : 2))
+            : (targetSymbol === "BTCUSD" ? 0.002 : 1);
+
+          const hasStrongShortEdge = !!stat && stat.expectedEdgeBps < -(stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS);
+          const strongDownTrend = !!stat && stat.trendStrength <= -Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.6);
+
+          if (hasStrongEdge && strongTrend && seedQtyLong > 0) {
+            const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", seedQtyLong);
+            logScanOrderOutcome("SCALPER", orderOutcome);
+          } else if (hasStrongShortEdge && strongDownTrend && seedQtyShort > 0) {
+            // Attempt a short-entry SELL when a clear downtrend + negative edge exists
+            const orderOutcome = await executeAutopilotOrder(targetSymbol, "SELL", seedQtyShort);
             logScanOrderOutcome("SCALPER", orderOutcome);
           } else {
-            addAutopilotLog(`Skipped scalper BUY for ${targetSymbol}: edge or trend insufficient.`, "info");
+            addAutopilotLog(`Skipped scalper entry for ${targetSymbol}: no clear long/short edge.`, "info");
           }
           continue;
         }
