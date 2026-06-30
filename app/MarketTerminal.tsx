@@ -601,7 +601,7 @@ export default function MarketTerminal() {
     lastCandleAction: string;
   }>>({});
 
-  const [autopilotInterval, setAutopilotInterval] = useState(30); // in seconds (raised default to reduce API load and false signals)
+  const [autopilotInterval, setAutopilotInterval] = useState(5); // temporarily reduced to 5s for broader testing
   const [autopilotFailurePauseSeconds, setAutopilotFailurePauseSeconds] = useState(120);
   // Global scanning master switch — user confirmed live trading; enable scanning by default
   const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
@@ -732,7 +732,21 @@ export default function MarketTerminal() {
       const autoSwitchRaw = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotAutoSwitchEnabled");
       if (autoSwitchRaw) setAutopilotAutoSwitchEnabled(autoSwitchRaw === "true");
       const savedInterval = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotInterval");
-      if (savedInterval) setAutopilotInterval(Math.max(1, parseInt(savedInterval)));
+      if (savedInterval) {
+        const parsed = Math.max(1, parseInt(savedInterval));
+        // If saved interval is larger than 5s, temporarily lower it to 5s for testing.
+        if (parsed > 5) {
+          setAutopilotInterval(5);
+          try {
+            localStorage.setItem("sentry:autopilotInterval", String(5));
+          } catch (e) {}
+        } else {
+          setAutopilotInterval(parsed);
+        }
+      } else {
+        // No saved value: default to 5s for temporary testing
+        setAutopilotInterval(5);
+      }
       const savedFailurePause = typeof window !== "undefined" && localStorage.getItem("sentry:autopilotFailurePauseSeconds");
       if (savedFailurePause) setAutopilotFailurePauseSeconds(Math.max(30, parseInt(savedFailurePause)));
       setHasLoadedPersistentSettings(true);
