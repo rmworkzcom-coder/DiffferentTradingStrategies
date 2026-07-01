@@ -75,12 +75,6 @@ export async function GET(req: Request) {
     }
 
     const { apiKey, apiSecret } = resolveAlpacaCredentials();
-    if (!apiKey || !apiSecret) {
-      return NextResponse.json(
-        { error: "API Key or Secret missing on server. Add ALPACA_* keys to .env.local and restart the dev server." },
-        { status: 200 }
-      );
-    }
 
     const headers = {
       "APCA-API-KEY-ID": apiKey,
@@ -127,28 +121,54 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: `No live quote available for ${symbolRaw}.` }, { status: 200 });
     }
 
-    const stockTradeData = await fetchJsonWithTimeout(
-      `https://data.alpaca.markets/v2/stocks/${encodeURIComponent(symbolRaw)}/trades/latest`,
-      headers
-    );
-    if (stockTradeData) {
-      const tradePrice = Number(stockTradeData?.trade?.p);
-      if (Number.isFinite(tradePrice) && tradePrice > 0) {
-        quoteCache.set(symbolRaw, { price: tradePrice, source: "alpaca-stock-trade", cachedAt: now });
-        return NextResponse.json({ symbol: symbolRaw, price: tradePrice, source: "alpaca-stock-trade" });
+    // Try Alpaca stock trade/quote endpoints if we have credentials
+    if (apiKey && apiSecret) {
+      const headers = {
+        "APCA-API-KEY-ID": apiKey,
+        "APCA-API-SECRET-KEY": apiSecret,
+        "Content-Type": "application/json",
+        "User-Agent": "Alpaca-Margin-Terminal/1.0",
+      };
+
+      const stockTradeData = await fetchJsonWithTimeout(
+        `https://data.alpaca.markets/v2/stocks/${encodeURIComponent(symbolRaw)}/trades/latest`,
+        headers
+      );
+      if (stockTradeData) {
+        const tradePrice = Number(stockTradeData?.trade?.p);
+        if (Number.isFinite(tradePrice) && tradePrice > 0) {
+          quoteCache.set(symbolRaw, { price: tradePrice, source: "alpaca-stock-trade", cachedAt: now });
+          return NextResponse.json({ symbol: symbolRaw, price: tradePrice, source: "alpaca-stock-trade" });
+        }
+      }
+
+      const stockQuoteData = await fetchJsonWithTimeout(
+        `https://data.alpaca.markets/v2/stocks/${encodeURIComponent(symbolRaw)}/quotes/latest`,
+        headers
+      );
+      if (stockQuoteData) {
+        const mid = quoteToMid(stockQuoteData?.quote);
+        if (Number.isFinite(mid) && (mid as number) > 0) {
+          quoteCache.set(symbolRaw, { price: mid as number, source: "alpaca-stock-quote", cachedAt: now });
+          return NextResponse.json({ symbol: symbolRaw, price: mid, source: "alpaca-stock-quote" });
+        }
       }
     }
 
-    const stockQuoteData = await fetchJsonWithTimeout(
-      `https://data.alpaca.markets/v2/stocks/${encodeURIComponent(symbolRaw)}/quotes/latest`,
-      headers
-    );
-    if (stockQuoteData) {
-      const mid = quoteToMid(stockQuoteData?.quote);
-      if (Number.isFinite(mid) && (mid as number) > 0) {
-        quoteCache.set(symbolRaw, { price: mid as number, source: "alpaca-stock-quote", cachedAt: now });
-        return NextResponse.json({ symbol: symbolRaw, price: mid, source: "alpaca-stock-quote" });
+    // If Alpaca credentials are missing or Alpaca endpoints failed, try public Yahoo Finance as a fallback.
+    try {
+      const yahooData = await fetchJsonWithTimeout(
+        `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbolRaw)}`,
+        {}
+      );
+      const yq = yahooData?.quoteResponse?.result?.[0];
+      const yahooPrice = Number(yq?.regularMarketPrice ?? yq?.ask ?? yq?.bid ?? yq?.preMarketPrice ?? yq?.postMarketPrice);
+      if (Number.isFinite(yahooPrice) && yahooPrice > 0) {
+        quoteCache.set(symbolRaw, { price: yahooPrice, source: "yahoo", cachedAt: now });
+        return NextResponse.json({ symbol: symbolRaw, price: yahooPrice, source: "yahoo" });
       }
+    } catch (e) {
+      // swallow and continue to stale/cached handling below
     }
 
     if (cached && now - cached.cachedAt <= QUOTE_STALE_MAX_MS) {

@@ -1876,6 +1876,9 @@ export default function MarketTerminal() {
             body: JSON.stringify({ symbol: normSymbol, side, type: "MARKET", quantity: cryptoQtyToSend, isLive: true, openShort: side === "SELL", preferredUsdt, preferredSource }),
           });
         } else {
+          // Send USD notional for equities so we can buy fractional shares by dollar amount
+          const notionalUsd = parseFloat((finalQty * liveEstimatedPrice).toFixed(2));
+          try { console.debug(`[AUTOPILOT][DEBUG] sending equity order as notional=${notionalUsd} USD for ${symbolClean} (finalQty=${finalQty}, estPrice=${liveEstimatedPrice})`); } catch (e) {}
           response = await fetch("/api/alpaca/trade", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1884,7 +1887,7 @@ export default function MarketTerminal() {
               apiSecret: curRef.apiSecret,
               isPaper: curRef.isPaper,
               symbol: symbolClean,
-              qty: finalQty,
+              notional: notionalUsd,
               side: side.toLowerCase(),
               estimatedPrice: liveEstimatedPrice,
             }),
