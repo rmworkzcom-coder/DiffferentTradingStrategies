@@ -1011,7 +1011,7 @@ export default function MarketTerminal() {
   const autopilotTargetSymbolIndexRef = useRef(0);
   const LIQUIDATION_COOLDOWN_MS = 30 * 60 * 1000;
   const AUTOPILOT_MIN_HOLD_MS = 8 * 60 * 1000;
-  const AUTOPILOT_MAX_TRADES_PER_DAY = 18;
+  const AUTOPILOT_MAX_TRADES_PER_DAY = 500;
   const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 60;
   const AUTOPILOT_MIN_TREND_STRENGTH = 0.7;
   const AUTOPILOT_MIN_ATR_PCT = 0.35;
