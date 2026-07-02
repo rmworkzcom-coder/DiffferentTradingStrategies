@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
-const FETCH_TIMEOUT_MS = 12000;
+const FETCH_TIMEOUT_MS = 30000;
 
 async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -10,6 +10,18 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
     return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function fetchWithRetries(url: string, options: RequestInit = {}, retries = 2) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fetchWithTimeout(url, options, FETCH_TIMEOUT_MS);
+    } catch (e) {
+      if (i === retries) throw e;
+      // small backoff
+      await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+    }
   }
 }
 
@@ -75,8 +87,8 @@ export async function POST(req: Request) {
     };
 
     const [accountResult, positionsResult] = await Promise.allSettled([
-      fetchWithTimeout(`${baseUrl}/v2/account`, { headers, cache: "no-store" }),
-      fetchWithTimeout(`${baseUrl}/v2/positions`, { headers, cache: "no-store" }),
+      fetchWithRetries(`${baseUrl}/v2/account`, { headers, cache: "no-store" }),
+      fetchWithRetries(`${baseUrl}/v2/positions`, { headers, cache: "no-store" }),
     ]);
 
     if (accountResult.status === "rejected") {
