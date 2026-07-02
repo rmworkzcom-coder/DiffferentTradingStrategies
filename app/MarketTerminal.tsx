@@ -62,6 +62,7 @@ interface Log {
 type AutopilotOrderOutcomeCode =
   | "FILLED"
   | "PENDING_BROKER_ACCEPTED"
+  | "PENDING_TIMEOUT"
   | "BLOCKED_MARKET_CLOSED"
   | "BLOCKED_BUY_COOLDOWN"
   | "BLOCKED_MIN_HOLD"
@@ -1993,21 +1994,60 @@ export default function MarketTerminal() {
               submittedQty: finalQty,
               submittedAt: Date.now(),
             };
-            const tinyOrderTimeoutMs = 15000;
-            const standardOrderTimeoutMs = 45000;
+            const tinyOrderTimeoutMs = 30000;
+            const standardOrderTimeoutMs = 90000;
             const isTinyOrder = finalQty <= Math.max(0.25, (Number(curRef.liveMinOrderQty) || 0.01) * 10);
             const pendingClearTimeoutMs = isTinyOrder ? tinyOrderTimeoutMs : standardOrderTimeoutMs;
+            const submittedOrderId = dataOrder?.id ? String(dataOrder.id) : "";
+
+            const pollOrderStatusBeforeTimeout = async () => {
+              if (!submittedOrderId) return null;
+              try {
+                const statusRes = await fetch("/api/alpaca/order-status", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    isPaper: curRef.isPaper,
+                    orderId: submittedOrderId,
+                    apiKey: curRef.apiKey,
+                    apiSecret: curRef.apiSecret,
+                  }),
+                });
+                const statusBody = await statusRes.json();
+                if (!statusRes.ok || statusBody?.error) return null;
+                const status = String(statusBody?.status || "").toUpperCase();
+                const filledQtyFromStatus = Number(statusBody?.filled_qty || 0);
+                const filledLike = status === "FILLED" || status === "PARTIALLY_FILLED";
+                if (!filledLike) return null;
+                return {
+                  filledQty: Number.isFinite(filledQtyFromStatus) && filledQtyFromStatus > 0 ? filledQtyFromStatus : finalQty,
+                };
+              } catch {
+                return null;
+              }
+            };
+
             // Avoid sticky pending state forever when broker status updates are delayed.
-            setTimeout(() => {
+            setTimeout(async () => {
+              const fillInfo = await pollOrderStatusBeforeTimeout();
               autopilotPendingBuySymbolsRef.current.delete(symbolClean);
               delete autopilotPendingBuyMetaRef.current[symbolClean];
               setLastAutopilotOutcomeVerbose((prev) => {
                 if (!prev || prev.status !== "PENDING" || prev.symbol !== symbolClean) return prev;
+                if (fillInfo) {
+                  return {
+                    ...prev,
+                    status: "FILLED",
+                    code: "FILLED",
+                    executedQty: fillInfo.filledQty,
+                    message: "Broker fill confirmed via delayed status poll.",
+                  };
+                }
                 return {
                   ...prev,
-                  status: "BLOCKED",
-                  code: "BLOCKED_BUY_COOLDOWN",
-                  message: `Pending broker confirmation timed out for ${symbolClean}. Auto-seed hold released.`
+                  status: "PENDING",
+                  code: "PENDING_TIMEOUT",
+                  message: `Pending broker confirmation still unresolved for ${symbolClean} after ${Math.floor(pendingClearTimeoutMs / 1000)}s. Auto-seed hold released.`
                 };
               });
             }, pendingClearTimeoutMs);
@@ -4988,8 +5028,6 @@ if __name__ == "__main__":
   const activePositionsCount = (useAlpacaLive ? (alpacaPositions || []) : (mockPositions || []))
     .filter((p: any) => Math.abs(parseFloat(String(p?.qty || 0))) > 0)
     .length;
-  const signalsFoundCount = Object.values(autopilotPerformance || {}).reduce((s: number, c: any) => s + (c.wins || 0) + (c.losses || 0), 0) || 0;
-  const tradesOpenedCount = Object.values(symbolProfitStats || {}).reduce((s: number, v: any) => s + (v.trades || 0), 0) || 0;
   const nextScanIn = autopilotNextScanInSec ?? autopilotInterval;
   const connectionStatus = isConnected ? "Alpaca Connected" : "Alpaca Disconnected";
   const alpacaAuthText = isConnected ? "OK" : "N/A";
@@ -5273,8 +5311,6 @@ if __name__ == "__main__":
                     </div>
                     <div className="flex items-center gap-6 text-sm text-gray-200">
                       <div className="text-center"><div className="text-xs text-gray-400">ACTIVE POSITIONS</div><div className="font-bold text-lg">{activePositionsCount}</div></div>
-                      <div className="text-center"><div className="text-xs text-gray-400">SIGNALS FOUND</div><div className="font-bold text-lg">{signalsFoundCount}</div></div>
-                      <div className="text-center"><div className="text-xs text-gray-400">TRADES OPENED</div><div className="font-bold text-lg">{tradesOpenedCount}</div></div>
                       <div className="text-center"><div className="text-xs text-gray-400">NEXT SCAN IN</div><div className="font-bold text-lg">{isAutopilotRunning ? 'Scanning...' : `${nextScanIn} sec`}</div></div>
                       <div className="pl-4 border-l border-white/10 text-sm">
                         <div className="text-xs text-gray-400">CONNECTION</div>
