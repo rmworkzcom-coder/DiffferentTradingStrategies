@@ -606,7 +606,7 @@ export default function MarketTerminal() {
   const [autopilotFailurePauseSeconds, setAutopilotFailurePauseSeconds] = useState(120);
   // Global scanning master switch — user confirmed live trading; enable scanning by default
   const [scanningEnabled, setScanningEnabled] = useState<boolean>(true);
-  const DEFAULT_AUTOPILOT_TARGET_TICKERS = "AAPL,MSFT,JPM,XOM,JNJ,WMT,NEE,CAT,PG,UNH";
+  const DEFAULT_AUTOPILOT_TARGET_TICKERS = quickTickers.join(",");
   const [autopilotTargetTicker, setAutopilotTargetTicker] = useState(DEFAULT_AUTOPILOT_TARGET_TICKERS);
   const [autopilotScanBroadUniverse, setAutopilotScanBroadUniverse] = useState<boolean>(true);
   const [blockedMarkets, setBlockedMarkets] = useState<{ wallStreet: boolean }>({ wallStreet: false });
@@ -902,6 +902,7 @@ export default function MarketTerminal() {
   const [autopilotScanTotalTargets, setAutopilotScanTotalTargets] = useState<number>(0);
   const [autopilotScanProcessedCount, setAutopilotScanProcessedCount] = useState<number>(0);
   const [autopilotPerformance, setAutopilotPerformance] = useState<Record<string, PerformanceCounts>>({});
+  const [autopilotBlockCodeCounts, setAutopilotBlockCodeCounts] = useState<Record<string, number>>({});
   const [symbolPerformance, setSymbolPerformance] = useState<Record<string, PerformanceCounts>>({});
   const [symbolProfitStats, setSymbolProfitStats] = useState<Record<string, { trades: number; wins: number; losses: number; realizedPnl: number }>>({});
   const [isAutopilotRunning, setIsAutopilotRunning] = useState(false);
@@ -1007,6 +1008,7 @@ export default function MarketTerminal() {
   const autopilotPriceWindowRef = useRef<Record<string, number[]>>({});
   const autopilotMarketStatsRef = useRef<Record<string, AutopilotMarketStats>>({});
   const autopilotDailyGuardRef = useRef<{ dayKey: string; trades: number; realizedPnl: number }>({ dayKey: "", trades: 0, realizedPnl: 0 });
+  const autopilotPostLossPauseRef = useRef<{ dayKey: string; armed: boolean; until: number }>({ dayKey: "", armed: false, until: 0 });
   const insufficientUsdtCooldownRef = useRef<number>(0);
   const lastAutoLiquidationDayRef = useRef<string | null>(null);
   const orderMutexRef = useRef<AsyncMutex>(new AsyncMutex());
@@ -1015,10 +1017,11 @@ export default function MarketTerminal() {
   const AUTOPILOT_MIN_HOLD_MS = 8 * 60 * 1000;
   const AUTOPILOT_MAX_TRADES_PER_DAY = 500;
   const AUTOPILOT_DAILY_LOSS_LIMIT_USD = 60;
-  const AUTOPILOT_MIN_TREND_STRENGTH = 0.7;
-  const AUTOPILOT_MIN_ATR_PCT = 0.35;
-  const AUTOPILOT_MAX_CHOP_SCORE = 0.45;
-  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 60;
+  const AUTOPILOT_MIN_TREND_STRENGTH = 0.55;
+  const AUTOPILOT_MIN_ATR_PCT = 0.02;
+  const AUTOPILOT_MAX_CHOP_SCORE = 0.6;
+  const AUTOPILOT_MIN_EDGE_BUFFER_BPS = 2;
+  const AUTOPILOT_POST_LOSS_COOLDOWN_MS = 15 * 60 * 1000;
   const AUTOPILOT_FAILURE_PAUSE_MS = autopilotFailurePauseSeconds * 1000;
 
   const armLiquidationCooldown = useCallback((symbol: string, source: string) => {
@@ -1547,7 +1550,7 @@ export default function MarketTerminal() {
         addAutopilotLog(`Blocked live short of ${symbolClean}: repeated borrow/unavailability failures — throttling short attempts for ${Math.ceil(SHORT_FAILURE_WINDOW_MS / 60000)}m.`, "warn");
         return {
           status: "BLOCKED",
-          code: "BLOCKED_SHORT_THROTTLED",
+          code: "BLOCKED_SHORT_RESTRICTED",
           symbol: symbolClean,
           side,
           requestedQty: qtyNum,
@@ -1582,15 +1585,37 @@ export default function MarketTerminal() {
       }
 
       if (dayGuard.realizedPnl < 0) {
-        return {
-          status: "BLOCKED",
-          code: "BLOCKED_POST_LOSS",
-          symbol: symbolClean,
-          side,
-          requestedQty: qtyNum,
-          executedQty: 0,
-          message: `Daily P/L is negative (${dayGuard.realizedPnl.toFixed(2)}). New buy entries are blocked for the rest of the trading day.`
-        };
+        const postLossPause = autopilotPostLossPauseRef.current;
+        if (postLossPause.dayKey !== dayGuard.dayKey) {
+          postLossPause.dayKey = dayGuard.dayKey;
+          postLossPause.armed = false;
+          postLossPause.until = 0;
+        }
+
+        if (!postLossPause.armed) {
+          postLossPause.armed = true;
+          postLossPause.until = Date.now() + AUTOPILOT_POST_LOSS_COOLDOWN_MS;
+        }
+
+        const nowMs = Date.now();
+        if (nowMs < postLossPause.until) {
+          const secLeft = Math.ceil((postLossPause.until - nowMs) / 1000);
+          return {
+            status: "BLOCKED",
+            code: "BLOCKED_LOSS_GUARD",
+            symbol: symbolClean,
+            side,
+            requestedQty: qtyNum,
+            executedQty: 0,
+            message: `Daily P/L is negative (${dayGuard.realizedPnl.toFixed(2)}). Cooling down entries for ${secLeft}s before retrying.`
+          };
+        }
+      } else {
+        const postLossPause = autopilotPostLossPauseRef.current;
+        if (postLossPause.dayKey === dayGuard.dayKey && postLossPause.armed) {
+          postLossPause.armed = false;
+          postLossPause.until = 0;
+        }
       }
 
       // Regime/chop/edge guards — only in live mode and only once the price window is mature (≥12 ticks)
@@ -2712,6 +2737,13 @@ export default function MarketTerminal() {
 
     adjustCounts(source, outcome);
 
+    if (outcome.status === "BLOCKED") {
+      setAutopilotBlockCodeCounts((prev) => ({
+        ...prev,
+        [outcome.code]: (prev[outcome.code] || 0) + 1,
+      }));
+    }
+
     if (outcome.status === "BLOCKED" || outcome.status === "REJECTED") {
       autopilotFailureStrikeRef.current += 1;
       const strikes = autopilotFailureStrikeRef.current;
@@ -2970,7 +3002,7 @@ export default function MarketTerminal() {
           : parseFloat(Math.max(liveMinQty, budgetQtyRaw).toFixed(2));
 
         const stat = autopilotMarketStatsRef.current[targetSymbol];
-        const directionalTrendThreshold = Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.6);
+        const directionalTrendThreshold = Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.5);
         const hasStrongLongEdge = !!stat && stat.expectedEdgeBps > stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS;
         const strongUpTrend = !!stat && stat.trendStrength >= directionalTrendThreshold;
 
@@ -7434,6 +7466,47 @@ if __name__ == "__main__":
                             <div>
                               <div className="text-[10px] text-gray-400">Worst realized P/L</div>
                               <div className="text-white font-semibold">{bottomPnl ? `${bottomPnl.symbol} ${bottomPnl.realizedPnl >= 0 ? "+" : ""}${bottomPnl.realizedPnl.toFixed(2)}` : "n/a"}</div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                    <div className="rounded-xl border border-brand-border/40 bg-slate-950/70 p-3 text-[10px] text-gray-300">
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-[11px] text-gray-400 uppercase tracking-[0.2em] font-semibold">Block reason counters</span>
+                        <span className="text-yellow-300">{Object.values(autopilotBlockCodeCounts).reduce((sum, n) => sum + n, 0)} blocks</span>
+                      </div>
+                      {(() => {
+                        const getCount = (code: string) => autopilotBlockCodeCounts[code] || 0;
+                        const regime = getCount("BLOCKED_REGIME_FILTER");
+                        const chop = getCount("BLOCKED_CHOP_ZONE");
+                        const edge = getCount("BLOCKED_EDGE_COST");
+                        const lossGuard = getCount("BLOCKED_LOSS_GUARD");
+                        const tracked = regime + chop + edge + lossGuard;
+                        const total = Object.values(autopilotBlockCodeCounts).reduce((sum, n) => sum + n, 0);
+                        const other = Math.max(0, total - tracked);
+
+                        return (
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                            <div>
+                              <div className="text-[10px] text-gray-400">Regime</div>
+                              <div className="text-white font-semibold">{regime}</div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-gray-400">Chop</div>
+                              <div className="text-white font-semibold">{chop}</div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-gray-400">Edge/Cost</div>
+                              <div className="text-white font-semibold">{edge}</div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-gray-400">Loss Guard</div>
+                              <div className="text-white font-semibold">{lossGuard}</div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-gray-400">Other</div>
+                              <div className="text-white font-semibold">{other}</div>
                             </div>
                           </div>
                         );
