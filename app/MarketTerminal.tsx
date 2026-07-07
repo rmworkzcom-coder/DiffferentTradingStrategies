@@ -1153,7 +1153,8 @@ export default function MarketTerminal() {
       .split(/[\s,]+/)
       .map((s) => s.trim().toUpperCase())
       .filter(Boolean);
-    const broadUniverseTargets = autopilotScanBroadUniverse ? quickTickers.map((s) => s.toUpperCase()) : [];
+    // Force full-universe coverage for scan metrics and rotation.
+    const broadUniverseTargets = quickTickers.map((s) => s.toUpperCase());
     const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : fallbackTargets), ...broadUniverseTargets]));
 
     let scanTargets = [...baseTargets];
@@ -2830,9 +2831,8 @@ export default function MarketTerminal() {
       // Allow broad-universe targets when the user has enabled the option.
       // Previously this was disabled in live mode for safety; allow it here
       // but keep a conservative processing cap for live broker calls.
-      const broadUniverseTargets = (autopilotScanBroadUniverse)
-        ? quickTickers.map((s) => s.toUpperCase())
-        : [];
+      // Force full-universe coverage irrespective of persisted broad-scan toggle.
+      const broadUniverseTargets = quickTickers.map((s) => s.toUpperCase());
       const baseTargets = Array.from(new Set([...(parsedTargets.length > 0 ? parsedTargets : fallbackTargets), ...broadUniverseTargets]));
       const equityTargets = baseTargets.filter((sym: string) => !isCryptoSymbol(sym));
       let scanTargets = equityTargets.length > 0 ? equityTargets : fallbackTargets;
@@ -2877,20 +2877,14 @@ export default function MarketTerminal() {
         return;
       }
 
-      // Limit how many distinct symbols we attempt per scan to avoid rapid multi-symbol bursts.
-      // When broad-universe scanning is disabled we only process a single target each scan
-      // so the `autopilotInterval` pause is effective. If broad-universe is enabled, allow
-      // a small batch so the system cycles through more of the universe without flooding the broker.
-      // In live mode we previously limited to a single symbol per scan.
-      // Temporarily increase to a small batch when broad-universe is enabled
-      // to let the system rotate through more tickers without being too aggressive.
-      const maxTargetsPerScan = curRef.useAlpacaLive
-        ? (autopilotScanBroadUniverse ? 5 : 1)
-        : (autopilotScanBroadUniverse ? 10 : 1);
+      // In broad-universe mode, process the full target list each scan cycle.
+      // This gives deterministic full-universe coverage (e.g. 300/300), at the
+      // cost of heavier quote/API traffic.
+      const maxTargetsPerScan = autopilotScanBroadUniverse ? scanTargets.length : 1;
 
       if (curRef.useAlpacaLive && autopilotScanBroadUniverse) {
         if (!liveBroadWarningLoggedRef.current) {
-          addAutopilotLog(`Broad Universe Scan enabled in LIVE mode — processing up to ${maxTargetsPerScan} targets per scan. Monitor broker rate limits.`, "warn");
+          addAutopilotLog(`Broad Universe Scan enabled in LIVE mode — processing full universe (${maxTargetsPerScan} targets) each scan. Monitor broker/API rate limits.`, "warn");
           liveBroadWarningLoggedRef.current = true;
         }
       }
