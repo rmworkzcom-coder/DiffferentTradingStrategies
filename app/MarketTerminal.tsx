@@ -1841,7 +1841,12 @@ export default function MarketTerminal() {
     }
 
     if (curRef.useAlpacaLive) {
-      if (!curRef.isConnected) {
+      const hasLiveBrokerContext = Boolean(
+        curRef.isConnected ||
+        curRef.alpacaAccount ||
+        (curRef.apiKey && curRef.apiSecret)
+      );
+      if (!hasLiveBrokerContext) {
         addAutopilotLog(`Blocked automated order: credentials are disconnected.`, "warn");
         return {
           status: "BLOCKED",
@@ -2705,10 +2710,27 @@ export default function MarketTerminal() {
 
   const ERROR_OUTCOME_STICKY_MS = 45_000; // errors stay in the UI card for 45s
 
+  const isExpectedSafetyBlock = useCallback((code?: string) => {
+    if (!code) return false;
+    return [
+      "BLOCKED_MAX_CONCURRENT",
+      "BLOCKED_REGIME_FILTER",
+      "BLOCKED_CHOP_ZONE",
+      "BLOCKED_EDGE_COST",
+      "BLOCKED_EXPOSURE_CAP",
+      "BLOCKED_LOSS_GUARD",
+      "BLOCKED_BLACKLIST",
+      "BLOCKED_MARKET",
+    ].includes(code);
+  }, []);
+
   const logScanOrderOutcome = useCallback((source: string, outcome: AutopilotOrderResult) => {
     const now = Date.now();
     const isError = outcome.status === "BLOCKED" || outcome.status === "REJECTED";
     const isGood  = outcome.status === "FILLED"  || outcome.status === "PENDING";
+    const isExecutionFailure = outcome.status === "REJECTED" || outcome.status === "INVALID" || (
+      outcome.status === "BLOCKED" && !isExpectedSafetyBlock(outcome.code)
+    );
 
     setLastAutopilotOutcomeVerbose((prev) => {
       const prevIsError = prev && (prev.status === "BLOCKED" || prev.status === "REJECTED");
@@ -2787,7 +2809,7 @@ export default function MarketTerminal() {
       }));
     }
 
-    if (outcome.status === "BLOCKED" || outcome.status === "REJECTED") {
+    if (isExecutionFailure) {
       autopilotFailureStrikeRef.current += 1;
       const strikes = autopilotFailureStrikeRef.current;
       if (strikes >= 3) {
@@ -2815,7 +2837,7 @@ export default function MarketTerminal() {
     } else {
       addAutopilotLog(`${source}: ${outcome.status} ${outcome.side} ${outcome.requestedQty} ${outcome.symbol} (${outcome.code}) - ${outcome.message}`, "warn");
     }
-  }, [addAutopilotLog, addLog, ERROR_OUTCOME_STICKY_MS, AUTOPILOT_FAILURE_PAUSE_MS, autopilotCurrentScanTarget]);
+  }, [addAutopilotLog, addLog, ERROR_OUTCOME_STICKY_MS, AUTOPILOT_FAILURE_PAUSE_MS, autopilotCurrentScanTarget, isExpectedSafetyBlock]);
 
   // Immediate deleverage command callable from UI
   const performDeleverage = useCallback(async () => {
@@ -3048,6 +3070,8 @@ export default function MarketTerminal() {
         const directionalTrendThreshold = Math.max(AUTOPILOT_MIN_TREND_STRENGTH, 0.5);
         const hasStrongLongEdge = !!stat && stat.expectedEdgeBps > stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS;
         const strongUpTrend = !!stat && stat.trendStrength >= directionalTrendThreshold;
+        const hasMatureSignal = Boolean(stat && Number.isFinite(stat.trendStrength) && Number.isFinite(stat.expectedEdgeBps));
+        const shouldFallbackBuy = !existingScalperPos && liveQtyByBudget > 0 && (!hasMatureSignal || (Math.abs(stat?.trendStrength || 0) < 0.25 && Math.abs(stat?.expectedEdgeBps || 0) < (stat?.estimatedCostBps || 0) + AUTOPILOT_MIN_EDGE_BUFFER_BPS));
 
         if (hasPendingSeedBuy) {
           addAutopilotLog(`Scalper bootstrap paused for ${targetSymbol}: previous BUY is still pending broker fill confirmation.`, "info");
@@ -3067,11 +3091,12 @@ export default function MarketTerminal() {
           const hasStrongShortEdge = !!stat && stat.expectedEdgeBps < -(stat.estimatedCostBps + AUTOPILOT_MIN_EDGE_BUFFER_BPS);
           const strongDownTrend = !!stat && stat.trendStrength <= -directionalTrendThreshold;
 
-          if (hasStrongLongEdge && strongUpTrend && seedQtyLong > 0) {
+          if ((hasStrongLongEdge && strongUpTrend && seedQtyLong > 0) || shouldFallbackBuy) {
             // compute confidence and adapt sizing
             const sig = computeSignalConfidence(stat);
             const adjQty = computeAdaptiveQty(seedQtyLong, sig.confidence, targetSymbol);
-            addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence*100)}% confidence. Using qty ${adjQty}.`, "info");
+            const reasonLabel = shouldFallbackBuy ? "fallback" : "signal";
+            addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence*100)}% confidence. Using qty ${adjQty} via ${reasonLabel} entry.`, "info");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", adjQty);
             logScanOrderOutcome("SCALPER", orderOutcome);
           } else if (hasStrongShortEdge && strongDownTrend && seedQtyShort > 0) {
@@ -4251,13 +4276,19 @@ export default function MarketTerminal() {
     }
   };
 
-  const liveAccountReady = Boolean(alpacaAccount && (isConnected || useAlpacaLive));
+  const liveAccountReady = Boolean(
+    alpacaAccount &&
+      (alpacaAccount.account_number || alpacaAccount.cash || alpacaAccount.equity || alpacaAccount.portfolio_value)
+  );
 
   // Calculations for current active mode
   const activePositions = liveAccountReady ? alpacaPositions : mockPositions;
   const activeCash = liveAccountReady
-    ? parseFloat(alpacaAccount?.cash || 0)
+    ? parseFloat(alpacaAccount?.cash || "0")
     : simCash;
+  const liveBrokerEquity = liveAccountReady
+    ? parseFloat(alpacaAccount?.equity || alpacaAccount?.portfolio_value || alpacaAccount?.cash || "0")
+    : null;
 
   // Portfolio aggregates
   const totalMarketValue = activePositions.reduce(
@@ -4265,7 +4296,7 @@ export default function MarketTerminal() {
     0
   );
 
-  const totalEquity = activeCash + totalMarketValue;
+  const totalEquity = liveBrokerEquity !== null ? liveBrokerEquity : activeCash + totalMarketValue;
   const netProfit = liveAccountReady ? 0 : totalEquity - startingCapital;
   const roiPercent = liveAccountReady ? 0 : (startingCapital > 0 ? (netProfit / startingCapital) * 100 : 0);
   // Percent of cash used by portfolio: positions value / (cash + positions)
