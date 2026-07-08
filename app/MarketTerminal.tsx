@@ -1406,16 +1406,22 @@ export default function MarketTerminal() {
       addLog("ALPACA", "SYNC", "Real-time positions and balances successfully synced.", "SUCCESS");
     } catch (err: any) {
       console.error(err);
-      setAlpacaAccount(null);
-      setAlpacaPositions([]);
-      setIsConnected(false);
-      setUseAlpacaLive(false);
-      localStorage.setItem("APCA_USE_ALPACA", "false");
+      if (!alpacaAccount) {
+        setAlpacaAccount(null);
+        setAlpacaPositions([]);
+        setIsConnected(false);
+        setUseAlpacaLive(false);
+        localStorage.setItem("APCA_USE_ALPACA", "false");
+      } else {
+        setIsConnected(true);
+        setUseAlpacaLive(true);
+        localStorage.setItem("APCA_USE_ALPACA", "true");
+      }
       addLog(brokerType, "SYNC_ERROR", `Data stream refresh interrupted: ${err.message || err}`, "WARNING");
     } finally {
       setIsRefreshing(false);
     }
-  }, [useAlpacaLive, brokerType, apiKey, apiSecret, isPaper, addLog, mergeBinanceSpotIntoPositions]);
+  }, [useAlpacaLive, brokerType, apiKey, apiSecret, isPaper, addLog, mergeBinanceSpotIntoPositions, alpacaAccount]);
 
   // Stable state ref to bypass interval recreate throttling
   const stateRef = React.useRef<any>({
