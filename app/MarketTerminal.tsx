@@ -1532,6 +1532,20 @@ export default function MarketTerminal() {
 
   // (moved) addAutopilotLog is hoisted above to avoid TDZ issues
 
+  const shouldBlockConcurrentBuyEntry = useCallback((symbol: string, side: "BUY" | "SELL", positions: Position[] | undefined, pendingBuyCount: number) => {
+    const curRef = stateRef.current;
+    if (side !== "BUY") return false;
+
+    const limit = Math.max(1, Number(curRef.maxConcurrentPositions) || 999);
+    if (limit >= 999) return false;
+
+    const existingLong = (positions || []).find((p: any) => p.symbol === symbol && parseFloat(p.qty || 0) > 0);
+    if (existingLong) return false;
+
+    const counts = computeOpenCounts(positions || []);
+    return (counts.all + pendingBuyCount) >= limit;
+  }, []);
+
   const executeAutopilotOrder = useCallback(async (symbolClean: string, side: "BUY" | "SELL", qtyNum: number): Promise<AutopilotOrderResult> => {
     const curRef = stateRef.current;
     if (qtyNum <= 0) {
@@ -1566,6 +1580,22 @@ export default function MarketTerminal() {
 
     const activePositionsForCloseCheck = curRef.useAlpacaLive ? (curRef.alpacaPositions || []) : (curRef.mockPositions || []);
     const existingPositionBeforeOrder = activePositionsForCloseCheck.find((p: any) => p.symbol === symbolClean);
+    const pendingBuyCount = autopilotPendingBuySymbolsRef.current.size;
+    if (side === "BUY" && shouldBlockConcurrentBuyEntry(symbolClean, side, activePositionsForCloseCheck, pendingBuyCount)) {
+      const limit = Math.max(1, Number(curRef.maxConcurrentPositions) || 999);
+      const counts = computeOpenCounts(activePositionsForCloseCheck || []);
+      addAutopilotLog(`🧭 Position cap reached for ${symbolClean}: ${counts.all} open + ${pendingBuyCount} pending (limit ${limit}).`, "info");
+      return {
+        status: "BLOCKED",
+        code: "BLOCKED_MAX_CONCURRENT",
+        symbol: symbolClean,
+        side,
+        requestedQty: qtyNum,
+        executedQty: 0,
+        message: `Concurrent position limit (${limit}) reached.`
+      };
+    }
+
     const isFullCloseAttempt = !!existingPositionBeforeOrder && (
       (existingPositionBeforeOrder.qty > 0 && side === "SELL" && qtyNum >= existingPositionBeforeOrder.qty) ||
       (existingPositionBeforeOrder.qty < 0 && side === "BUY" && qtyNum >= Math.abs(existingPositionBeforeOrder.qty))
@@ -3001,13 +3031,23 @@ export default function MarketTerminal() {
       const processedScanTargets = orderedScanTargets.slice(0, Math.max(1, Math.min(orderedScanTargets.length, maxTargetsPerScan)));
 
       for (const targetSymbol of processedScanTargets) {
+        const iterationRef = stateRef.current;
+        const currentActivePositionsForIteration: Position[] = (iterationRef.useAlpacaLive ? iterationRef.alpacaPositions : iterationRef.mockPositions) || [];
+        const livePositionsSnapshot = currentActivePositionsForIteration;
+        const capReachedBeforeTarget = shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", livePositionsSnapshot, autopilotPendingBuySymbolsRef.current.size);
+        if (capReachedBeforeTarget) {
+          addAutopilotLog(`Autopilot scan paused: position cap (${maxOpenPositions}) already reached before evaluating ${targetSymbol}.`, "info");
+          setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
+          break;
+        }
+
         setAutopilotCurrentScanTarget(targetSymbol);
         setAutopilotScanProcessedCount((prev) => prev + 1);
 
         // Yield to the browser so log/state updates can render during long scan batches.
         await new Promise((resolve) => setTimeout(resolve, 0));
 
-        const matchedForStats = currentActivePositions.find((p) => p.symbol === targetSymbol);
+        const matchedForStats = currentActivePositionsForIteration.find((p) => p.symbol === targetSymbol);
         let scanPrice = matchedForStats?.current_price || 0;
         if (!Number.isFinite(scanPrice) || scanPrice <= 0) {
           const quotePrice = await fetchAutopilotQuote(targetSymbol);
@@ -3105,6 +3145,12 @@ export default function MarketTerminal() {
           const strongDownTrend = !!stat && stat.trendStrength <= -directionalTrendThreshold;
 
           if ((hasStrongLongEdge && strongUpTrend && seedQtyLong > 0) || shouldFallbackBuy) {
+            const positionsSnapshot = (curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions) || [];
+            if (shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", positionsSnapshot, autopilotPendingBuySymbolsRef.current.size)) {
+              addAutopilotLog(`Skipping ${targetSymbol}: position cap (${maxOpenPositions}) already reached.`, "info");
+              setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
+              break;
+            }
             // compute confidence and adapt sizing
             const sig = computeSignalConfidence(stat);
             const adjQty = computeAdaptiveQty(seedQtyLong, sig.confidence, targetSymbol);
@@ -3112,6 +3158,14 @@ export default function MarketTerminal() {
             addAutopilotLog(`SignalClassifier: ${sig.label} @ ${Math.round(sig.confidence*100)}% confidence. Using qty ${adjQty} via ${reasonLabel} entry.`, "info");
             const orderOutcome = await executeAutopilotOrder(targetSymbol, "BUY", adjQty);
             logScanOrderOutcome("SCALPER", orderOutcome);
+            if (orderOutcome.status === "BLOCKED" && orderOutcome.code === "BLOCKED_MAX_CONCURRENT") {
+              const updatedPositions = curRef.useAlpacaLive ? curRef.alpacaPositions : curRef.mockPositions;
+              if (shouldBlockConcurrentBuyEntry(targetSymbol, "BUY", updatedPositions, autopilotPendingBuySymbolsRef.current.size)) {
+                addAutopilotLog(`Autopilot scan stopped: position cap (${maxOpenPositions}) reached after the latest order attempt.`, "info");
+                setAutopilotScanError(`Position cap reached (${maxOpenPositions}).`);
+                break;
+              }
+            }
           } else if (hasStrongShortEdge && strongDownTrend && seedQtyShort > 0) {
             // Attempt a short-entry SELL when a clear downtrend + negative edge exists
             // Proactively check shortability where possible
