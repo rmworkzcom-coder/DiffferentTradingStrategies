@@ -371,7 +371,7 @@ export default function MarketTerminal() {
   const [autopilotLossGuard, setAutopilotLossGuard] = useState(true); // Drawdown Shield Protection
   const [autopilotBlacklist, setAutopilotBlacklist] = useState<string[]>(["TSLA"]); // Prevent low winrate long traps (e.g. TSLA)
 
-  const cancelUnresolvedBrokerOrders = useCallback(async () => {
+  const cancelUnresolvedBrokerOrders = async () => {
     if (!useAlpacaLive || !isConnected || !apiKey || !apiSecret) return;
 
     const sessionKey = `${new Date().toISOString().slice(0, 10)}:${marketSession}`;
@@ -420,7 +420,7 @@ export default function MarketTerminal() {
       console.error("Session cleanup failed", error);
       addLog("ALPACA", "SESSION_CLEANUP_ERROR", error?.message || "Failed to cancel unresolved broker orders.", "WARNING");
     }
-  }, [apiKey, apiSecret, isConnected, isPaper, marketSession, useAlpacaLive]);
+  };
 
   // Connection & loading flags
   const [isConnecting, setIsConnecting] = useState(false);
@@ -435,7 +435,7 @@ export default function MarketTerminal() {
     if (!useAlpacaLive || !isConnected || !apiKey || !apiSecret) return;
     if (marketSession !== "CLOSED") return;
     void cancelUnresolvedBrokerOrders();
-  }, [apiKey, apiSecret, cancelUnresolvedBrokerOrders, isConnected, marketSession, useAlpacaLive]);
+  }, [apiKey, apiSecret, isConnected, marketSession, useAlpacaLive]);
   const [, setBinanceFundingSource] = useState<"futures" | "spot" | "none">("none");
   const [, setBinanceFundingUpdatedAt] = useState<number | null>(null);
 
