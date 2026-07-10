@@ -1302,8 +1302,8 @@ export default function MarketTerminal() {
     const cashValue = isAlpaca ? parseFloat(curRef.alpacaAccount?.cash || "0") : parseFloat(curRef.simCash as any || 0);
     const totalPortfolio = Math.max(1, totalPosValue + cashValue);
 
-    const exposureCap = Math.min(Math.max(30, curRef.maxExposurePercentPerSymbol || 40), 50);
-    const baseExposurePct = isAlpaca ? 30 : 20;
+    const exposureCap = Math.min(Math.max(30, curRef.maxExposurePercentPerSymbol || 40), 60);
+    const baseExposurePct = isAlpaca ? 45 : 28;
     let exposurePct = baseExposurePct;
 
     if (stats) {
@@ -1322,11 +1322,11 @@ export default function MarketTerminal() {
     const minQty = symbol === "BTCUSD" ? 0.0001 : 1;
     const maxQty = isAlpaca
       ? symbol === "BTCUSD"
-        ? 0.003
-        : 6
+        ? 0.01
+        : 20
       : symbol === "BTCUSD"
-        ? 0.001
-        : 1;
+        ? 0.003
+        : 6;
     let qty = Math.max(minQty, qtyFromExposure);
     qty = Math.min(qty, maxQty);
 
